@@ -5,18 +5,24 @@ OmniVoice Core is a Python prototype for a real-time, full-duplex AI voice agent
 ## What it does
 
 - Streams 100 ms binary WebM audio chunks over a WebSocket.
-- Transcribes speech in supported browsers with the Web Speech API.
-- Streams LLM response tokens from Groq using `llama-3.1-8b-instant`.
+- Auto-detects English or Malayalam per completed utterance with Groq Whisper.
+- Transcribes English live server-side with Deepgram Nova-3 when selected.
+- Uses browser speech recognition for the Malayalam-only fallback option.
+- Streams LLM response tokens from Groq using `openai/gpt-oss-20b`.
 - Checks a local semantic cache before calling the LLM.
 - Speaks incoming responses sentence-by-sentence with browser speech synthesis.
 - Supports barge-in: a new user utterance cancels the in-flight assistant response.
-- Displays connection state, transport acknowledgements, cache hits, and time to first token (TTFT).
+- Rejects immediate duplicate final transcripts and tags every assistant turn with a server-issued turn ID.
+- Reconnects an interrupted browser session up to three times with exponential backoff.
+- Displays connection state, STT latency, transport acknowledgements, cache hits, and time to first token (TTFT).
 
 ## Architecture
 
 ```text
 Browser microphone / typed message
   -> WebSocket (/ws/audio/{client_id})
+  -> Auto: browser VAD + Groq Whisper language detection
+     OR English: Deepgram live transcription
   -> SemanticCacheRouter (FAISS + MiniLM)
   -> cached answer OR AsyncGroq stream
   -> WebSocket assistant tokens
@@ -29,9 +35,10 @@ The semantic cache uses `sentence-transformers/all-MiniLM-L6-v2` with normalized
 
 - Python 3.11 or later
 - A Groq API key for answers that are not served by the semantic cache
+- A Deepgram API key for server-side live transcription
 - Chrome or Edge recommended for browser speech recognition
 
-Deepgram is listed as an optional dependency for future server-side transcription. The current UI uses the browser Web Speech API, so a Deepgram key is not required to run the existing flow.
+**Auto** mode sends a completed, voice-detected utterance to Whisper and attempts to identify English or Malayalam. Automatic identification can be unreliable for very short, noisy, or code-mixed speech. For Malayalam, choose **Malayalam — Whisper Large v3 (recommended)**: it uses Groq's higher-accuracy Whisper model with the `ml` language hint, avoiding the auto-identification step. Select **English — Deepgram live STT** when English-only, low-latency interim captions are more important.
 
 ## Setup
 
@@ -49,10 +56,13 @@ Edit `.env` and set your Groq key:
 
 ```env
 GROQ_API_KEY=gsk_your_actual_key
-DEEPGRAM_API_KEY=your_deepgram_key_here
+DEEPGRAM_API_KEY=your_actual_deepgram_key
+SARVAM_API_KEY=your_sarvam_key_for_future_malayalam_evaluation
 ```
 
 Never commit `.env`. It is ignored by Git.
+
+`SARVAM_API_KEY` is reserved for a later Malayalam streaming evaluation and is not used by the current runtime.
 
 ## Run locally
 
@@ -63,6 +73,21 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 Open [http://127.0.0.1:8000](http://127.0.0.1:8000) and choose **Start Voice Stream**. Grant microphone permission when prompted.
 
 To make the app reachable from other devices on your local network, use `--host 0.0.0.0` and protect it appropriately before exposing it beyond a trusted network.
+
+## Operational endpoints
+
+- `GET /health` reports server liveness, active connection count, and whether each provider key is configured. It never returns secrets.
+- `GET /ready` returns `200` after the semantic cache is warmed, or `503` while it is unavailable.
+
+## Tests
+
+Run the no-credit automated checks from the project root:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+They cover provider-key validation, health/readiness responses, semantic-cache streaming, and the actionable missing-Groq error path. They do not call any external AI provider.
 
 ## WebSocket protocol
 
@@ -77,18 +102,24 @@ ws://127.0.0.1:8000/ws/audio/{client_id}
 | Type | Payload | Purpose |
 | --- | --- | --- |
 | Binary frame | Audio bytes | Sends an audio chunk. |
+| `audio_utterance_start` | `{"type":"audio_utterance_start","mime_type":"audio/webm"}` followed by one binary frame | Sends a voice-detected complete utterance for auto-language transcription. |
 | `user_utterance` | `{"type":"user_utterance","text":"..."}` | Sends a final transcript or typed message. |
 | `barge_in` | `{"type":"barge_in"}` | Cancels active assistant response tasks. |
+
+The WebSocket `language` query parameter is set by the UI. `auto` selects Groq Whisper language detection, `en-US` selects Deepgram live transcription, and `ml-IN` selects the language-hinted Whisper Large v3 Malayalam path.
 
 ### Server to client
 
 | Type | Key fields | Purpose |
 | --- | --- | --- |
 | Transport acknowledgement | `status`, `bytes_received`, `chunk_size`, `latency_ms` | Confirms received audio chunks. |
-| `user_utterance_received` | `text` | Confirms receipt of a user utterance. |
-| `assistant_token` | `text`, `source`, optional `ttft_ms` | Streams assistant text. `source` is `semantic_cache` or `groq`. |
-| `assistant_response_end` | `source` | Marks completion of a response. |
-| `assistant_error` | `message` | Reports a generation error. |
+| `user_utterance_received` | `text`, `source`, `turn_id`, optional `stt_latency_ms` | Confirms receipt of a de-duplicated user utterance. |
+| `stt_status` | `provider`, `ready` | Reports the selected transcription path. |
+| `stt_transcript` | `text`, `is_final`, `source` | Sends interim or final transcript updates. |
+| `assistant_token` | `text`, `source`, `turn_id`, optional `ttft_ms` | Streams assistant text. `source` is `semantic_cache` or `groq`. |
+| `assistant_response_end` | `source`, `turn_id`, `total_response_ms` | Marks completion of a response. |
+| `assistant_interrupted` | `turn_id` | Confirms that barge-in cancelled the active response. |
+| `assistant_error` | `message`, `code`, `turn_id` | Reports a generation error. |
 
 Semantic-cache tokens also include `latency_tag: "<20ms"` for the UI.
 
@@ -98,6 +129,8 @@ Semantic-cache tokens also include `latency_tag: "<20ms"` for the UI.
 app/
   main.py              FastAPI app and full-duplex WebSocket endpoint
   ai_pipeline.py       AsyncGroq token streaming
+  deepgram_stream.py   Async Deepgram Nova-3 streaming transcription
+  groq_stt.py          Async Groq Whisper auto-language transcription
   semantic_cache.py    MiniLM embeddings and FAISS cache router
   connection_pool.py   Active WebSocket connection tracking
 static/
@@ -107,7 +140,10 @@ static/
 ## Troubleshooting
 
 - **The assistant returns an error for non-FAQ questions:** verify `GROQ_API_KEY`, then restart Uvicorn.
-- **Speech transcription does not start:** grant microphone permission and use Chrome or Edge. You can still use the typed message input.
+- **Auto mode does not transcribe:** grant microphone permission, speak after the one-second room-noise calibration, and pause briefly after each utterance. The browser sends the detected speech turn to Whisper after about 900 ms of silence.
+- **Malayalam is inaccurate:** select **Malayalam — Whisper Large v3 (recommended)**, speak a complete phrase, and pause after it. Do not use Auto mode when Malayalam accuracy is required.
+- **Deepgram cannot connect:** verify `DEEPGRAM_API_KEY`, then restart Uvicorn. The UI will use browser speech recognition as a fallback when supported.
+- **Speech transcription does not start:** grant microphone permission. You can still use the typed message input.
 - **No response after changing `.env`:** restart the server; environment variables are read at startup.
 - **Model error from Groq:** update the model identifier in `app/ai_pipeline.py` to a model enabled for your Groq account.
 

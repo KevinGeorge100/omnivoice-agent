@@ -148,6 +148,27 @@
                 <canvas id="visualizer" class="w-full h-full block"></canvas>
             </div>
 
+            <div class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+                <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Live transcript</p>
+                <p id="sttPreview" class="mt-1 truncate text-xs text-slate-600">Waiting for speech…</p>
+                <div class="mt-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                    <span id="voicePhase">Idle</span>
+                    <span class="text-slate-300">•</span>
+                    <span id="sttLatency">STT --</span>
+                </div>
+            </div>
+
+            <div id="sessionNotice" role="alert" class="hidden rounded-xl border px-3 py-2 text-xs leading-relaxed"></div>
+
+            <label class="flex items-center justify-between gap-3 text-xs font-semibold text-slate-600" for="languageSelect">
+                Conversation language
+                <select id="languageSelect" class="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                    <option value="auto" selected>Auto — English + Malayalam (best effort)</option>
+                    <option value="en-US">English — Deepgram live STT</option>
+                    <option value="ml-IN">Malayalam — Whisper Large v3 (recommended)</option>
+                </select>
+            </label>
+
             <p class="text-xs text-slate-500 leading-relaxed">
                 Captures raw microphone audio and streams binary 100ms WebM/PCM packets over WebSocket.
             </p>
@@ -239,6 +260,28 @@
         let dataArray = null;
         let animationFrameId = null;
         let recognition = null;
+        let serverSttReady = null;
+        let browserSttFallbackTimer = null;
+        let utteranceRecorder = null;
+        let autoVadFrameId = null;
+        let autoCaptureActive = false;
+        let autoSpeechStartedAt = 0;
+        let autoSilenceStartedAt = null;
+        let autoVadStartedAt = 0;
+        let autoNoiseFloor = 0.008;
+        let activeMicrophoneStream = null;
+        let isStoppingSession = false;
+        let activeTurnId = null;
+        let shouldReconnect = false;
+        let reconnectAttempts = 0;
+        let reconnectTimer = null;
+        let isReconnectAttempt = false;
+
+        const MAX_RECONNECT_ATTEMPTS = 3;
+
+        const AUTO_VAD_MIN_UTTERANCE_MS = 1000;
+        const AUTO_VAD_SILENCE_MS = 900;
+        const AUTO_VAD_MAX_UTTERANCE_MS = 18000;
 
         let chunkCount = 0;
         let totalBytes = 0;
@@ -273,9 +316,50 @@
         const manualUtterance = document.getElementById("manualUtterance");
         const sendUtteranceBtn = document.getElementById("sendUtteranceBtn");
         const sttStatusBadge = document.getElementById("sttStatusBadge");
+        const sttPreview = document.getElementById("sttPreview");
+        const languageSelect = document.getElementById("languageSelect");
         const telemetryRate = document.getElementById("telemetryRate");
+        const sessionNotice = document.getElementById("sessionNotice");
+        const voicePhase = document.getElementById("voicePhase");
+        const sttLatency = document.getElementById("sttLatency");
 
         valClientId.innerText = "Session ID: " + clientId;
+
+        function showSessionNotice(message, tone = "error") {
+            const tones = {
+                error: "border-rose-200 bg-rose-50 text-rose-700",
+                warning: "border-amber-200 bg-amber-50 text-amber-700",
+                info: "border-sky-200 bg-sky-50 text-sky-700",
+            };
+            sessionNotice.className = `rounded-xl border px-3 py-2 text-xs leading-relaxed ${tones[tone] || tones.error}`;
+            sessionNotice.textContent = message;
+        }
+
+        function clearSessionNotice() {
+            sessionNotice.className = "hidden rounded-xl border px-3 py-2 text-xs leading-relaxed";
+            sessionNotice.textContent = "";
+        }
+
+        function setVoicePhase(phase) {
+            voicePhase.textContent = phase.toUpperCase();
+        }
+
+        function scheduleReconnect() {
+            if (!shouldReconnect || reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                if (shouldReconnect && reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                    showSessionNotice("Reconnection stopped after three attempts. Start a new session when ready.", "warning");
+                }
+                return;
+            }
+
+            reconnectAttempts += 1;
+            const delayMs = Math.min(1000 * (2 ** (reconnectAttempts - 1)), 8000);
+            setVoicePhase(`Reconnecting ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`);
+            reconnectTimer = window.setTimeout(() => {
+                isReconnectAttempt = true;
+                startBtn.click();
+            }, delayMs);
+        }
 
         // Audio Waveform Visualizer
         function setupVisualizer(stream) {
@@ -324,12 +408,120 @@
             }
         }
 
+        function preferredAudioMimeType() {
+            if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
+                return "audio/webm;codecs=opus";
+            }
+            return "audio/webm";
+        }
+
+        function startAutoUtteranceRecorder(stream) {
+            if (utteranceRecorder && utteranceRecorder.state === "recording") return;
+
+            const mimeType = preferredAudioMimeType();
+            utteranceRecorder = new MediaRecorder(stream, { mimeType });
+            utteranceRecorder.ondataavailable = (event) => {
+                if (event.data.size < 512 || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+                ws.send(JSON.stringify({
+                    type: "audio_utterance_start",
+                    mime_type: "audio/webm",
+                }));
+                ws.send(event.data);
+            };
+            utteranceRecorder.start();
+            autoCaptureActive = true;
+            autoSpeechStartedAt = performance.now();
+            autoSilenceStartedAt = null;
+            setVoicePhase("Listening");
+            sttPreview.innerText = languageSelect.value === "ml-IN"
+                ? "Listening for a Malayalam utterance…"
+                : "Listening for an English or Malayalam utterance…";
+            handleBargeIn();
+        }
+
+        function stopAutoUtteranceRecorder() {
+            if (!autoCaptureActive) return;
+            autoCaptureActive = false;
+            autoSilenceStartedAt = null;
+            if (utteranceRecorder && utteranceRecorder.state === "recording") {
+                utteranceRecorder.stop();
+                setVoicePhase("Transcribing");
+                sttPreview.innerText = "Transcribing utterance…";
+            }
+        }
+
+        function startAutoSpeechDetector(stream) {
+            if (
+                autoVadFrameId ||
+                !["auto", "ml-IN"].includes(languageSelect.value) ||
+                !analyser ||
+                !stream
+            ) return;
+
+            const samples = new Uint8Array(analyser.fftSize);
+            autoNoiseFloor = 0.008;
+            autoVadStartedAt = performance.now();
+
+            const monitor = () => {
+                autoVadFrameId = requestAnimationFrame(monitor);
+                if (!analyser || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+                analyser.getByteTimeDomainData(samples);
+                let energy = 0;
+                for (const sample of samples) {
+                    const normalized = (sample - 128) / 128;
+                    energy += normalized * normalized;
+                }
+                const rms = Math.sqrt(energy / samples.length);
+                const now = performance.now();
+
+                // Calibrate to the caller's room noise for the first second, then adapt only while idle.
+                if (now - autoVadStartedAt < 1000) {
+                    autoNoiseFloor = (autoNoiseFloor * 0.85) + (rms * 0.15);
+                    return;
+                }
+                if (!autoCaptureActive) {
+                    autoNoiseFloor = (autoNoiseFloor * 0.98) + (rms * 0.02);
+                }
+
+                const speechThreshold = Math.max(0.012, autoNoiseFloor * 2.6);
+                const silenceThreshold = Math.max(0.008, autoNoiseFloor * 1.65);
+
+                if (!autoCaptureActive && rms > speechThreshold) {
+                    startAutoUtteranceRecorder(stream);
+                    return;
+                }
+
+                if (!autoCaptureActive) return;
+
+                const utteranceAge = now - autoSpeechStartedAt;
+                if (rms < silenceThreshold) {
+                    autoSilenceStartedAt ??= now;
+                    if (
+                        utteranceAge >= AUTO_VAD_MIN_UTTERANCE_MS &&
+                        now - autoSilenceStartedAt >= AUTO_VAD_SILENCE_MS
+                    ) {
+                        stopAutoUtteranceRecorder();
+                    }
+                } else {
+                    autoSilenceStartedAt = null;
+                }
+
+                if (utteranceAge >= AUTO_VAD_MAX_UTTERANCE_MS) {
+                    stopAutoUtteranceRecorder();
+                }
+            };
+            monitor();
+        }
+
         // Barge-in Handling
         function handleBargeIn() {
             const activePlayback = isAiSpeaking || ("speechSynthesis" in window && window.speechSynthesis.speaking);
             if (activePlayback) {
                 console.log("[BARGE-IN] Interruption detected. Halting playback and notifying server.");
                 cancelTTS();
+                setVoicePhase("Interrupted");
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: "barge_in" }));
 
@@ -345,7 +537,7 @@
         }
 
         // Speech Recognition Setup
-        function setupSpeechRecognition() {
+        function setupSpeechRecognition(locale = languageSelect.value) {
             const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
             if (!SpeechRecognition) {
                 sttStatusBadge.innerText = "STT: OFF";
@@ -356,7 +548,7 @@
             recognition = new SpeechRecognition();
             recognition.continuous = true;
             recognition.interimResults = true;
-            recognition.lang = "en-US";
+            recognition.lang = locale;
 
             recognition.onstart = () => {
                 sttStatusBadge.innerText = "STT: ON";
@@ -388,7 +580,7 @@
             };
 
             recognition.onend = () => {
-                if (ws && ws.readyState === WebSocket.OPEN) {
+                if (serverSttReady !== true && ws && ws.readyState === WebSocket.OPEN) {
                     try { recognition.start(); } catch (e) {}
                 } else {
                     sttStatusBadge.innerText = "STT: OFF";
@@ -453,13 +645,14 @@
         // User Utterance Dispatcher
         function sendUserUtterance(text) {
             if (!text) return;
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                showSessionNotice("Start a voice session before sending a message.", "warning");
+                return;
+            }
             handleBargeIn();
             appendUserBubble(text);
             prepareAssistantBubble();
-
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: "user_utterance", text: text }));
-            }
+            ws.send(JSON.stringify({ type: "user_utterance", text: text }));
         }
 
         function appendUserBubble(text) {
@@ -515,9 +708,9 @@
                         <span class="bg-emerald-50 text-emerald-600 border border-emerald-200/80 px-2 py-0.5 rounded text-[10px] font-bold uppercase">${data.ttft_ms}ms</span>
                     `;
                 } else {
-                    valTTFTSource.innerText = "Groq Llama-3.1";
+                    valTTFTSource.innerText = "Groq GPT-OSS";
                     currentAssistantBadgeContainer.innerHTML = `
-                        <span class="bg-sky-50 text-sky-600 border border-sky-200/80 px-2 py-0.5 rounded text-[10px] font-bold uppercase">Groq Llama-3.1</span>
+                        <span class="bg-sky-50 text-sky-600 border border-sky-200/80 px-2 py-0.5 rounded text-[10px] font-bold uppercase">Groq GPT-OSS</span>
                         <span class="bg-emerald-50 text-emerald-600 border border-emerald-200/80 px-2 py-0.5 rounded text-[10px] font-bold uppercase">TTFT ${data.ttft_ms}ms</span>
                     `;
                 }
@@ -562,11 +755,24 @@
 
         // Start Voice Session
         startBtn.onclick = async () => {
+            if (!isReconnectAttempt) {
+                shouldReconnect = true;
+                reconnectAttempts = 0;
+            }
+            isReconnectAttempt = false;
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            setVoicePhase("Connecting");
             const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-            ws = new WebSocket(`${protocol}//${location.host}/ws/audio/${clientId}`);
+            ws = new WebSocket(
+                `${protocol}//${location.host}/ws/audio/${clientId}?language=${encodeURIComponent(languageSelect.value)}`
+            );
             sessionStartTime = Date.now();
 
             ws.onopen = async () => {
+                isStoppingSession = false;
+                clearSessionNotice();
+                reconnectAttempts = 0;
+                setVoicePhase("Microphone setup");
                 statusDot.className = "w-2.5 h-2.5 rounded-full bg-emerald-500 ring-4 ring-emerald-100 animate-pulse shadow-[0_0_10px_#10b981] transition-all duration-300";
                 statusText.innerText = "Full-Duplex WS Active";
                 statusText.className = "text-emerald-600 font-bold";
@@ -575,12 +781,23 @@
 
                 startBtn.disabled = true;
                 stopBtn.disabled = false;
+                languageSelect.disabled = true;
 
                 try {
-                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    const stream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            channelCount: { ideal: 1 },
+                            echoCancellation: { ideal: true },
+                            noiseSuppression: { ideal: true },
+                            autoGainControl: { ideal: true },
+                            sampleRate: { ideal: 48000 },
+                            latency: { ideal: 0.01 },
+                        },
+                    });
+                    activeMicrophoneStream = stream;
                     setupVisualizer(stream);
 
-                    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+                    mediaRecorder = new MediaRecorder(stream, { mimeType: preferredAudioMimeType() });
                     mediaRecorder.ondataavailable = (event) => {
                         if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) {
                             ws.send(event.data);
@@ -588,16 +805,106 @@
                             valChunks.innerText = chunkCount;
                         }
                     };
+                    mediaRecorder.onerror = () => {
+                        showSessionNotice("Audio capture stopped unexpectedly. Reconnect and try again.");
+                    };
                     mediaRecorder.start(100); // 100ms packet emission window
+                    if (
+                        serverSttReady === true &&
+                        ["auto", "ml-IN"].includes(languageSelect.value)
+                    ) {
+                        startAutoSpeechDetector(stream);
+                    }
+                    setVoicePhase("Listening");
                 } catch (err) {
                     console.warn("Microphone capture unavailable or muted:", err);
+                    sttPreview.innerText = "Microphone access is required for voice transcription.";
+                    showSessionNotice("Microphone access was denied or is unavailable. You can still type a message.");
                 }
 
-                setupSpeechRecognition();
+                browserSttFallbackTimer = window.setTimeout(() => {
+                    if (serverSttReady === null) setupSpeechRecognition();
+                }, 2500);
             };
 
             ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
+                let data;
+                try {
+                    data = JSON.parse(event.data);
+                } catch (err) {
+                    console.warn("Ignoring malformed server event:", err);
+                    showSessionNotice("The server sent an invalid event. Reconnect and try again.");
+                    return;
+                }
+
+                if (data.type === "stt_status") {
+                    serverSttReady = data.ready;
+                    if (browserSttFallbackTimer) clearTimeout(browserSttFallbackTimer);
+
+                    if (data.provider === "groq_whisper" && data.ready) {
+                        if (recognition) try { recognition.stop(); } catch (e) {}
+                        const isMalayalam = data.language === "ml";
+                        sttStatusBadge.innerText = isMalayalam ? "STT: MALAYALAM" : "STT: AUTO";
+                        sttStatusBadge.className = "text-[10px] bg-violet-50 text-violet-600 border border-violet-200 px-2 py-0.5 rounded-full font-bold animate-pulse";
+                        sttPreview.innerText = isMalayalam
+                            ? "Whisper Large v3 is listening for Malayalam…"
+                            : "Auto-detecting English and Malayalam…";
+                        setVoicePhase("Listening");
+                        startAutoSpeechDetector(activeMicrophoneStream);
+                    } else if (data.ready) {
+                        if (recognition) try { recognition.stop(); } catch (e) {}
+                        sttStatusBadge.innerText = "STT: DEEPGRAM";
+                        sttStatusBadge.className = "text-[10px] bg-emerald-50 text-emerald-600 border border-emerald-200 px-2 py-0.5 rounded-full font-bold animate-pulse";
+                        sttPreview.innerText = "Deepgram is listening…";
+                        setVoicePhase("Listening");
+                    } else {
+                        sttStatusBadge.innerText = `STT: BROWSER (${data.language || "EN"})`;
+                        sttStatusBadge.className = "text-[10px] bg-sky-50 text-sky-600 border border-sky-200 px-2 py-0.5 rounded-full font-bold animate-pulse";
+                        sttPreview.innerText = data.message || "Using browser speech recognition…";
+                        if (data.message) showSessionNotice(data.message, "warning");
+                        setupSpeechRecognition(data.language || "en-US");
+                        setVoicePhase("Listening");
+                    }
+                    return;
+                }
+
+                if (data.type === "stt_transcript") {
+                    sttPreview.innerText = data.text || "Listening…";
+                    if (data.is_final) setVoicePhase("Transcribed");
+                    return;
+                }
+
+                if (data.type === "user_utterance_received") {
+                    activeTurnId = data.turn_id;
+                    if (data.source === "deepgram" || data.source === "groq_whisper") {
+                        appendUserBubble(data.text);
+                        prepareAssistantBubble();
+                    }
+                    if (data.stt_latency_ms !== undefined) {
+                        sttLatency.textContent = `STT ${data.stt_latency_ms} ms`;
+                    }
+                    setVoicePhase("Thinking");
+                    return;
+                }
+
+                if (data.type === "stt_error") {
+                    sttPreview.innerText = data.message || "Speech transcription failed. Please try again.";
+                    showSessionNotice(sttPreview.innerText);
+                    return;
+                }
+
+                if (data.type === "client_error") {
+                    showSessionNotice(data.message || "The server rejected an invalid event.");
+                    return;
+                }
+
+                if (data.type === "assistant_interrupted") {
+                    if (activeTurnId === null || data.turn_id === activeTurnId) {
+                        finalizeAssistantBubble();
+                        setVoicePhase("Interrupted");
+                    }
+                    return;
+                }
 
                 // Per-chunk streaming ACK
                 if (data.status === "streaming") {
@@ -629,24 +936,49 @@
                 }
 
                 if (data.type === "assistant_token") {
+                    if (activeTurnId !== null && data.turn_id !== activeTurnId) return;
+                    setVoicePhase("Responding");
                     appendAssistantToken(data);
                 } else if (data.type === "assistant_response_end") {
+                    if (activeTurnId !== null && data.turn_id !== activeTurnId) return;
                     finalizeAssistantBubble();
+                    setVoicePhase("Listening");
                 } else if (data.type === "assistant_error") {
+                    if (activeTurnId !== null && data.turn_id !== activeTurnId) return;
+                    showSessionNotice(data.message || "The assistant could not respond.");
                     if (currentAssistantContent) {
                         currentAssistantContent.innerText = "Error: " + data.message;
                     }
                     finalizeAssistantBubble();
+                    setVoicePhase("Listening");
                 }
             };
 
-            ws.onclose = () => {
+            ws.onerror = () => {
+                showSessionNotice("The voice connection encountered an error. Check the server and reconnect.");
+            };
+
+            ws.onclose = (event) => {
+                const reconnect = shouldReconnect && !isStoppingSession;
+                if (!isStoppingSession) {
+                    showSessionNotice(
+                        event.wasClean
+                            ? "The voice connection closed. Start a new session to continue."
+                            : "The voice connection was interrupted. Start a new session to reconnect.",
+                        "warning"
+                    );
+                }
                 resetUI();
+                if (reconnect) scheduleReconnect();
             };
         };
 
         stopBtn.onclick = () => {
+            isStoppingSession = true;
+            shouldReconnect = false;
+            if (reconnectTimer) clearTimeout(reconnectTimer);
             if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+            if (utteranceRecorder && utteranceRecorder.state !== "inactive") utteranceRecorder.stop();
             if (recognition) try { recognition.stop(); } catch(e){}
             cancelTTS();
             if (ws) ws.close();
@@ -654,6 +986,9 @@
         };
 
         function resetUI() {
+            if (browserSttFallbackTimer) clearTimeout(browserSttFallbackTimer);
+            serverSttReady = null;
+            activeTurnId = null;
             statusDot.className = "w-2.5 h-2.5 rounded-full bg-rose-500 transition-all duration-300";
             statusText.innerText = "Socket: Closed";
             statusText.className = "text-slate-500 font-semibold";
@@ -661,11 +996,23 @@
             valSession.className = "text-xl font-extrabold text-slate-800 font-mono tracking-tight";
             startBtn.disabled = false;
             stopBtn.disabled = true;
+            languageSelect.disabled = false;
             sttStatusBadge.innerText = "STT: OFF";
             sttStatusBadge.className = "text-[10px] bg-slate-100 text-slate-500 border border-slate-200 px-2 py-0.5 rounded-full font-bold";
+            sttPreview.innerText = "Waiting for speech…";
+            sttLatency.textContent = "STT --";
+            setVoicePhase("Idle");
 
             if (animationFrameId) cancelAnimationFrame(animationFrameId);
+            if (autoVadFrameId) cancelAnimationFrame(autoVadFrameId);
+            autoVadFrameId = null;
+            autoCaptureActive = false;
+            autoSilenceStartedAt = null;
             if (audioContext && audioContext.state !== "closed") audioContext.close();
+            if (activeMicrophoneStream) {
+                activeMicrophoneStream.getTracks().forEach((track) => track.stop());
+                activeMicrophoneStream = null;
+            }
             visualizerShell.classList.remove("visualizer-active");
 
             canvasCtx.fillStyle = "#0F172A";
