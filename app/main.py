@@ -9,12 +9,15 @@ from app.config import provider_status
 from app.connection_pool import pool_manager
 from app.deepgram_stream import DeepgramLiveTranscriber
 from app.groq_stt import GroqWhisperTranscriber
+from app.latency_metrics import TurnLatencyRecord, latency_metrics
+from app.sarvam_stream import SarvamLiveTranscriber
 from app.semantic_cache import semantic_cache
 from app.session import TranscriptDeduplicator, cancel_and_wait
 
 app = FastAPI(title="OmniVoice Core Transport Layer")
 logger = logging.getLogger(__name__)
 app.state.semantic_cache_ready = False
+SARVAM_PCM_FRAME_PREFIX = b"OVP1"
 
 
 @app.on_event("startup")
@@ -63,15 +66,48 @@ async def readiness() -> JSONResponse:
     )
 
 
+@app.get("/metrics/latency")
+async def latency_summary() -> dict[str, object]:
+    """Return recent non-sensitive latency distributions for the research harness."""
+    return latency_metrics.summary()
+
+
 async def stream_assistant_response(
     websocket: WebSocket,
     transcript: str,
     send_lock: asyncio.Lock,
     turn_id: int,
+    *,
+    turn_source: str = "browser",
+    stt_latency_ms: float | None = None,
+    turn_started_at: float | None = None,
 ) -> None:
     """Serve a semantic-cache hit or stream a fallback LLM response."""
     started_at = time.perf_counter()
     first_token_sent = False
+
+    def turn_latency_ms() -> float | None:
+        if turn_started_at is None:
+            return None
+        return round((time.perf_counter() - turn_started_at) * 1000, 2)
+
+    def record_completion(
+        *,
+        cache_hit: bool,
+        ttft_ms: float | None,
+        response_latency_ms: float,
+    ) -> None:
+        latency_metrics.record(
+            TurnLatencyRecord(
+                source=turn_source,
+                cache_hit=cache_hit,
+                stt_latency_ms=stt_latency_ms,
+                ttft_ms=round(ttft_ms, 2) if ttft_ms is not None else None,
+                turn_to_first_token_ms=turn_latency_ms() if ttft_ms is not None else None,
+                response_latency_ms=round(response_latency_ms, 2),
+                full_turn_latency_ms=turn_latency_ms(),
+            )
+        )
 
     try:
         cached_response = await semantic_cache.lookup(transcript)
@@ -97,6 +133,11 @@ async def stream_assistant_response(
                         "total_response_ms": round((time.perf_counter() - started_at) * 1000, 2),
                     }
                 )
+            record_completion(
+                cache_hit=True,
+                ttft_ms=cache_latency_ms,
+                response_latency_ms=(time.perf_counter() - started_at) * 1000,
+            )
             return
 
         if not ai_pipeline.is_configured():
@@ -127,17 +168,26 @@ async def stream_assistant_response(
                 }
                 if is_first_token:
                     payload["ttft_ms"] = round(ttft_ms, 2)
+                    if turn_started_at is not None:
+                        payload["turn_to_first_token_ms"] = turn_latency_ms()
                 await websocket.send_json(payload)
 
+        response_latency_ms = (time.perf_counter() - started_at) * 1000
         async with send_lock:
             await websocket.send_json(
                 {
                     "type": "assistant_response_end",
                     "source": "groq",
                     "turn_id": turn_id,
-                    "total_response_ms": round((time.perf_counter() - started_at) * 1000, 2),
+                    "total_response_ms": round(response_latency_ms, 2),
+                    "full_turn_latency_ms": turn_latency_ms(),
                 }
             )
+        record_completion(
+            cache_hit=False,
+            ttft_ms=ttft_ms if first_token_sent else None,
+            response_latency_ms=response_latency_ms,
+        )
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -165,17 +215,20 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
     response_tasks: set[asyncio.Task[None]] = set()
     transcription_tasks: set[asyncio.Task[None]] = set()
     transcriber: DeepgramLiveTranscriber | None = None
+    sarvam_transcriber: SarvamLiveTranscriber | None = None
     stt_language = websocket.query_params.get("language", "en-US")
     pending_utterance_mime: str | None = None
     pending_utterance_started_at: float | None = None
     whisper_transcriber: GroqWhisperTranscriber | None = None
     transcript_deduplicator = TranscriptDeduplicator()
     turn_id = 0
+    sarvam_speech_started_at: float | None = None
 
     async def begin_assistant_response(
         transcript: str,
         source: str,
         stt_latency_ms: float | None = None,
+        turn_started_at: float | None = None,
     ) -> None:
         """Cancel any active turn and start a response for one final transcript."""
         nonlocal turn_id
@@ -198,7 +251,15 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
             await websocket.send_json(event)
 
         task = asyncio.create_task(
-            stream_assistant_response(websocket, transcript, send_lock, turn_id),
+            stream_assistant_response(
+                websocket,
+                transcript,
+                send_lock,
+                turn_id,
+                turn_source=source,
+                stt_latency_ms=stt_latency_ms,
+                turn_started_at=turn_started_at,
+            ),
             name=f"llm-stream-{client_id}-turn-{turn_id}",
         )
         response_tasks.add(task)
@@ -217,6 +278,72 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
             )
         if is_final:
             await begin_assistant_response(transcript, source="deepgram")
+
+    async def handle_sarvam_vad(signal_type: str) -> None:
+        """Use Sarvam server VAD for a responsive Malayalam turn boundary and barge-in."""
+        nonlocal sarvam_speech_started_at
+        if signal_type == "START_SPEECH":
+            sarvam_speech_started_at = time.perf_counter()
+            await cancel_and_wait(response_tasks)
+        async with send_lock:
+            await websocket.send_json(
+                {
+                    "type": "stt_vad",
+                    "source": "sarvam",
+                    "signal": signal_type,
+                }
+            )
+
+    async def handle_sarvam_transcript(
+        transcript: str,
+        is_final: bool,
+    ) -> None:
+        """Relay partial Saaras text and route completed turns into the cache/LLM pipeline."""
+        if not is_final:
+            async with send_lock:
+                await websocket.send_json(
+                    {
+                        "type": "stt_transcript",
+                        "text": transcript,
+                        "is_final": False,
+                        "source": "sarvam",
+                    }
+                )
+            return
+        stt_latency_ms = (
+            (time.perf_counter() - sarvam_speech_started_at) * 1000
+            if sarvam_speech_started_at is not None
+            else None
+        )
+        async with send_lock:
+            await websocket.send_json(
+                {
+                    "type": "stt_transcript",
+                    "text": transcript,
+                    "is_final": True,
+                    "source": "sarvam",
+                }
+            )
+        await begin_assistant_response(
+            transcript,
+            source="sarvam",
+            stt_latency_ms=stt_latency_ms,
+            turn_started_at=sarvam_speech_started_at,
+        )
+
+    async def handle_sarvam_error(message: str) -> None:
+        logger.warning("Sarvam streaming error for client %s: %s", client_id, message)
+        try:
+            async with send_lock:
+                await websocket.send_json(
+                    {
+                        "type": "stt_error",
+                        "source": "sarvam",
+                        "message": "Malayalam streaming transcription is unavailable. Try again or type your message.",
+                    }
+                )
+        except (RuntimeError, WebSocketDisconnect):
+            pass
 
     async def transcribe_auto_utterance(
         audio: bytes,
@@ -285,32 +412,54 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
                     }
                 )
     elif stt_language.lower() in {"ml", "ml-in"}:
-        # A known language lets Whisper skip error-prone language identification.
-        if GroqWhisperTranscriber.is_configured():
-            whisper_transcriber = GroqWhisperTranscriber(
-                language="ml",
-                model="whisper-large-v3",
+        # Prefer the benchmark-selected Indic streaming provider. Groq remains a fallback.
+        try:
+            sarvam_transcriber = SarvamLiveTranscriber(
+                handle_sarvam_transcript,
+                handle_sarvam_vad,
+                handle_sarvam_error,
             )
+            await sarvam_transcriber.start()
             async with send_lock:
                 await websocket.send_json(
                     {
                         "type": "stt_status",
-                        "provider": "groq_whisper",
+                        "provider": "sarvam",
                         "ready": True,
-                        "language": "ml",
-                    }
-                )
-        else:
-            async with send_lock:
-                await websocket.send_json(
-                    {
-                        "type": "stt_status",
-                        "provider": "browser",
-                        "ready": False,
                         "language": "ml-IN",
-                        "message": "Groq speech-to-text is unavailable; using browser recognition.",
+                        "streaming": True,
+                        "sample_rate": SarvamLiveTranscriber.sample_rate,
                     }
                 )
+        except Exception:
+            logger.exception("Sarvam Malayalam streaming is unavailable for client %s", client_id)
+            sarvam_transcriber = None
+            if GroqWhisperTranscriber.is_configured():
+                whisper_transcriber = GroqWhisperTranscriber(
+                    language="ml",
+                    model="whisper-large-v3",
+                )
+                async with send_lock:
+                    await websocket.send_json(
+                        {
+                            "type": "stt_status",
+                            "provider": "groq_whisper",
+                            "ready": True,
+                            "language": "ml",
+                            "message": "Sarvam streaming is unavailable; using Groq Whisper fallback.",
+                        }
+                    )
+            else:
+                async with send_lock:
+                    await websocket.send_json(
+                        {
+                            "type": "stt_status",
+                            "provider": "browser",
+                            "ready": False,
+                            "language": "ml-IN",
+                            "message": "Malayalam STT is unavailable; type a message or configure Sarvam.",
+                        }
+                    )
     else:
         try:
             transcriber = DeepgramLiveTranscriber(handle_deepgram_transcript)
@@ -387,6 +536,10 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
             audio_chunk = message.get("bytes")
             if audio_chunk is None:
                 continue
+            if audio_chunk.startswith(SARVAM_PCM_FRAME_PREFIX):
+                if sarvam_transcriber is not None:
+                    await sarvam_transcriber.send_pcm(audio_chunk[len(SARVAM_PCM_FRAME_PREFIX) :])
+                continue
             if pending_utterance_mime is not None:
                 mime_type = pending_utterance_mime
                 pending_utterance_mime = None
@@ -418,6 +571,8 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
     finally:
         if transcriber is not None:
             await transcriber.close()
+        if sarvam_transcriber is not None:
+            await sarvam_transcriber.close()
         await cancel_and_wait(transcription_tasks)
         if whisper_transcriber is not None:
             await whisper_transcriber.close()

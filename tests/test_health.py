@@ -38,3 +38,12 @@ class HealthEndpointTests(unittest.IsolatedAsyncioTestCase):
         ready_response = await self._client.get("/ready")
         self.assertEqual(ready_response.status_code, 200)
         self.assertEqual(ready_response.json()["status"], "ready")
+
+    async def test_latency_metrics_endpoint_has_no_transcript_content(self) -> None:
+        response = await self._client.get("/metrics/latency")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("sample_count", payload)
+        self.assertIn("metrics_ms", payload)
+        self.assertNotIn("transcript", response.text.lower())

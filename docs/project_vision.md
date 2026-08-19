@@ -46,15 +46,17 @@ The intended system path is:
 ## Current implementation position
 
 The project has established its initial WebSocket transport, async response streaming,
-semantic cache, interruption handling, reconnect behaviour, and basic provider health
-visibility. The Malayalam Common Voice/Mozilla Data Collective benchmark is an **interim
-STT-provider validation**: it helps choose a transcription provider for Malayalam and does
-not replace the required FD-Bench and Fisher conversational benchmark.
+semantic cache, interruption handling, reconnect behaviour, provider health visibility,
+and bounded p50/p95/p99 latency observation. Malayalam mode now has an opt-in Sarvam
+16 kHz PCM streaming rail with server VAD while retaining the WebM transport baseline.
+The Malayalam Common Voice/Mozilla Data Collective benchmark is an **interim STT-provider
+validation**: it helps choose a transcription provider for Malayalam and does not replace
+the required FD-Bench and Fisher conversational benchmark.
 
-The next major implementation milestone is therefore to make the live voice path
-measurable in TTFA terms and begin the dataset-adapter/replay design for the standardized
-conversational evaluation harness. Live Malayalam routing remains a supporting capability,
-not a substitute for the research contribution.
+The next major implementation milestone is therefore to introduce provider-streamed TTS
+and true Time-to-First-Audio measurement, then begin the dataset-adapter/replay design for
+the standardized conversational evaluation harness. Live Malayalam routing remains a
+supporting capability, not a substitute for the research contribution.
 
 ## Definition of a credible result
 

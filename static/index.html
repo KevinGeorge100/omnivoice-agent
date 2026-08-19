@@ -165,7 +165,7 @@
                 <select id="languageSelect" class="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500">
                     <option value="auto" selected>Auto — English + Malayalam (best effort)</option>
                     <option value="en-US">English — Deepgram live STT</option>
-                    <option value="ml-IN">Malayalam — Whisper Large v3 (recommended)</option>
+                    <option value="ml-IN">Malayalam — Sarvam live STT (recommended)</option>
                 </select>
             </label>
 
@@ -256,6 +256,7 @@
         let ws = null;
         let mediaRecorder = null;
         let audioContext = null;
+        let microphoneSource = null;
         let analyser = null;
         let dataArray = null;
         let animationFrameId = null;
@@ -276,6 +277,9 @@
         let reconnectAttempts = 0;
         let reconnectTimer = null;
         let isReconnectAttempt = false;
+        let activeSttProvider = null;
+        let sarvamPcmNode = null;
+        let sarvamPcmModuleUrl = null;
 
         const MAX_RECONNECT_ATTEMPTS = 3;
 
@@ -372,10 +376,10 @@
                 const canvasWidth = bounds.width;
                 const canvasHeight = bounds.height;
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                const source = audioContext.createMediaStreamSource(stream);
+                microphoneSource = audioContext.createMediaStreamSource(stream);
                 analyser = audioContext.createAnalyser();
                 analyser.fftSize = 64;
-                source.connect(analyser);
+                microphoneSource.connect(analyser);
 
                 const bufferLength = analyser.frequencyBinCount;
                 dataArray = new Uint8Array(bufferLength);
@@ -413,6 +417,85 @@
                 return "audio/webm;codecs=opus";
             }
             return "audio/webm";
+        }
+
+        async function startSarvamPcmStream(stream) {
+            if (sarvamPcmNode) return;
+            if (!audioContext || !microphoneSource) setupVisualizer(stream);
+            if (!audioContext || !microphoneSource || !audioContext.audioWorklet) {
+                throw new Error("This browser does not support the PCM audio path required for Malayalam streaming.");
+            }
+
+            const processorCode = `
+                class OmniVoicePcmCaptureProcessor extends AudioWorkletProcessor {
+                    constructor() {
+                        super();
+                        this.frameSamples = Math.max(128, Math.round(sampleRate / 10));
+                        this.pending = new Float32Array(0);
+                    }
+                    process(inputs, outputs) {
+                        const output = outputs[0];
+                        if (output && output[0]) output[0].fill(0);
+                        const channel = inputs[0] && inputs[0][0];
+                        if (!channel) return true;
+
+                        const combined = new Float32Array(this.pending.length + channel.length);
+                        combined.set(this.pending);
+                        combined.set(channel, this.pending.length);
+                        this.pending = combined;
+
+                        while (this.pending.length >= this.frameSamples) {
+                            const frame = this.pending.slice(0, this.frameSamples);
+                            this.pending = this.pending.slice(this.frameSamples);
+                            const outputLength = Math.round(frame.length * 16000 / sampleRate);
+                            const pcm = new Int16Array(outputLength);
+                            for (let index = 0; index < outputLength; index++) {
+                                const position = index * sampleRate / 16000;
+                                const left = Math.floor(position);
+                                const right = Math.min(left + 1, frame.length - 1);
+                                const fraction = position - left;
+                                const sample = frame[left] + (frame[right] - frame[left]) * fraction;
+                                pcm[index] = Math.max(-1, Math.min(1, sample)) * 32767;
+                            }
+                            this.port.postMessage(pcm.buffer, [pcm.buffer]);
+                        }
+                        return true;
+                    }
+                }
+                registerProcessor("omnivoice-pcm-capture", OmniVoicePcmCaptureProcessor);
+            `;
+            const blob = new Blob([processorCode], { type: "application/javascript" });
+            sarvamPcmModuleUrl = URL.createObjectURL(blob);
+            await audioContext.audioWorklet.addModule(sarvamPcmModuleUrl);
+            await audioContext.resume();
+
+            sarvamPcmNode = new AudioWorkletNode(audioContext, "omnivoice-pcm-capture", {
+                numberOfInputs: 1,
+                numberOfOutputs: 1,
+                outputChannelCount: [1],
+            });
+            sarvamPcmNode.port.onmessage = ({ data }) => {
+                if (!ws || ws.readyState !== WebSocket.OPEN) return;
+                const pcmBytes = new Uint8Array(data);
+                const packet = new Uint8Array(4 + pcmBytes.byteLength);
+                packet.set([79, 86, 80, 49]); // OVP1: Sarvam 16 kHz PCM frame.
+                packet.set(pcmBytes, 4);
+                ws.send(packet.buffer);
+            };
+            microphoneSource.connect(sarvamPcmNode);
+            sarvamPcmNode.connect(audioContext.destination);
+        }
+
+        function stopSarvamPcmStream() {
+            if (sarvamPcmNode) {
+                sarvamPcmNode.port.onmessage = null;
+                sarvamPcmNode.disconnect();
+                sarvamPcmNode = null;
+            }
+            if (sarvamPcmModuleUrl) {
+                URL.revokeObjectURL(sarvamPcmModuleUrl);
+                sarvamPcmModuleUrl = null;
+            }
         }
 
         function startAutoUtteranceRecorder(stream) {
@@ -809,7 +892,9 @@
                         showSessionNotice("Audio capture stopped unexpectedly. Reconnect and try again.");
                     };
                     mediaRecorder.start(100); // 100ms packet emission window
-                    if (
+                    if (activeSttProvider === "sarvam") {
+                        await startSarvamPcmStream(stream);
+                    } else if (
                         serverSttReady === true &&
                         ["auto", "ml-IN"].includes(languageSelect.value)
                     ) {
@@ -839,9 +924,21 @@
 
                 if (data.type === "stt_status") {
                     serverSttReady = data.ready;
+                    activeSttProvider = data.provider;
                     if (browserSttFallbackTimer) clearTimeout(browserSttFallbackTimer);
 
-                    if (data.provider === "groq_whisper" && data.ready) {
+                    if (data.provider === "sarvam" && data.ready) {
+                        if (recognition) try { recognition.stop(); } catch (e) {}
+                        sttStatusBadge.innerText = "STT: SARVAM LIVE";
+                        sttStatusBadge.className = "text-[10px] bg-emerald-50 text-emerald-600 border border-emerald-200 px-2 py-0.5 rounded-full font-bold animate-pulse";
+                        sttPreview.innerText = "Sarvam is streaming Malayalam audio…";
+                        setVoicePhase("Listening");
+                        startSarvamPcmStream(activeMicrophoneStream).catch((error) => {
+                            console.warn("Malayalam PCM capture is unavailable:", error);
+                            sttPreview.innerText = "Malayalam streaming needs a modern Chrome or Edge browser.";
+                            showSessionNotice(sttPreview.innerText, "warning");
+                        });
+                    } else if (data.provider === "groq_whisper" && data.ready) {
                         if (recognition) try { recognition.stop(); } catch (e) {}
                         const isMalayalam = data.language === "ml";
                         sttStatusBadge.innerText = isMalayalam ? "STT: MALAYALAM" : "STT: AUTO";
@@ -874,9 +971,19 @@
                     return;
                 }
 
+                if (data.type === "stt_vad" && data.source === "sarvam") {
+                    if (data.signal === "START_SPEECH") {
+                        cancelTTS();
+                        setVoicePhase("Listening");
+                    } else if (data.signal === "END_SPEECH") {
+                        setVoicePhase("Transcribing");
+                    }
+                    return;
+                }
+
                 if (data.type === "user_utterance_received") {
                     activeTurnId = data.turn_id;
-                    if (data.source === "deepgram" || data.source === "groq_whisper") {
+                    if (["deepgram", "groq_whisper", "sarvam"].includes(data.source)) {
                         appendUserBubble(data.text);
                         prepareAssistantBubble();
                     }
@@ -988,6 +1095,7 @@
         function resetUI() {
             if (browserSttFallbackTimer) clearTimeout(browserSttFallbackTimer);
             serverSttReady = null;
+            activeSttProvider = null;
             activeTurnId = null;
             statusDot.className = "w-2.5 h-2.5 rounded-full bg-rose-500 transition-all duration-300";
             statusText.innerText = "Socket: Closed";
@@ -1008,7 +1116,9 @@
             autoVadFrameId = null;
             autoCaptureActive = false;
             autoSilenceStartedAt = null;
+            stopSarvamPcmStream();
             if (audioContext && audioContext.state !== "closed") audioContext.close();
+            microphoneSource = null;
             if (activeMicrophoneStream) {
                 activeMicrophoneStream.getTracks().forEach((track) => track.stop());
                 activeMicrophoneStream = null;

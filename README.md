@@ -18,8 +18,9 @@ future work: latency claims must be reproducible and dataset-driven.
 ## What it does
 
 - Streams 100 ms binary WebM audio chunks over a WebSocket.
-- Auto-detects English or Malayalam per completed utterance with Groq Whisper.
+- Keeps the existing auto English/Malayalam Groq Whisper fallback for completed utterances.
 - Transcribes English live server-side with Deepgram Nova-3 when selected.
+- Streams Malayalam 16 kHz PCM frames to Sarvam Saaras v3 real-time STT when Malayalam is selected and Sarvam is configured.
 - Uses browser speech recognition for the Malayalam-only fallback option.
 - Streams LLM response tokens from Groq using `openai/gpt-oss-20b`.
 - Checks a local semantic cache before calling the LLM.
@@ -36,6 +37,7 @@ Browser microphone / typed message
   -> WebSocket (/ws/audio/{client_id})
   -> Auto: browser VAD + Groq Whisper language detection
      OR English: Deepgram live transcription
+     OR Malayalam: browser 16 kHz PCM + Sarvam streaming STT/VAD
   -> SemanticCacheRouter (FAISS + MiniLM)
   -> cached answer OR AsyncGroq stream
   -> WebSocket assistant tokens
@@ -51,7 +53,7 @@ The semantic cache uses `sentence-transformers/all-MiniLM-L6-v2` with normalized
 - A Deepgram API key for server-side live transcription
 - Chrome or Edge recommended for browser speech recognition
 
-**Auto** mode sends a completed, voice-detected utterance to Whisper and attempts to identify English or Malayalam. Automatic identification can be unreliable for very short, noisy, or code-mixed speech. For Malayalam, choose **Malayalam — Whisper Large v3 (recommended)**: it uses Groq's higher-accuracy Whisper model with the `ml` language hint, avoiding the auto-identification step. Select **English — Deepgram live STT** when English-only, low-latency interim captions are more important.
+**Auto** mode sends a completed, voice-detected utterance to Whisper and attempts to identify English or Malayalam. Automatic identification can be unreliable for very short, noisy, or code-mixed speech. For Malayalam, choose **Malayalam — Sarvam live STT (recommended)**: it uses a persistent Saaras v3 real-time stream with 16 kHz PCM input, partial transcripts, and Sarvam server VAD. Groq Whisper remains a fallback if Sarvam cannot start. Select **English — Deepgram live STT** when English-only, low-latency interim captions are more important.
 
 ## Setup
 
@@ -114,6 +116,7 @@ To make the app reachable from other devices on your local network, use `--host 
 
 - `GET /health` reports server liveness, active connection count, and whether each provider key is configured. It never returns secrets.
 - `GET /ready` returns `200` after the semantic cache is warmed, or `503` while it is unavailable.
+- `GET /metrics/latency` returns bounded, transcript-free p50/p95/p99 latency summaries for completed assistant turns. It currently measures STT latency when observable, time to first LLM token, and full-turn time; true Time-to-First-Audio will be added with provider-streamed TTS.
 
 ## Tests
 
@@ -137,12 +140,13 @@ ws://127.0.0.1:8000/ws/audio/{client_id}
 
 | Type | Payload | Purpose |
 | --- | --- | --- |
-| Binary frame | Audio bytes | Sends an audio chunk. |
+| Binary frame | WebM audio bytes | Sends a transport-baseline audio chunk. |
+| Binary frame (`OVP1` prefix) | 16 kHz signed PCM bytes | Malayalam-only Sarvam streaming rail. The browser creates this in parallel; existing WebM transport remains unchanged. |
 | `audio_utterance_start` | `{"type":"audio_utterance_start","mime_type":"audio/webm"}` followed by one binary frame | Sends a voice-detected complete utterance for auto-language transcription. |
 | `user_utterance` | `{"type":"user_utterance","text":"..."}` | Sends a final transcript or typed message. |
 | `barge_in` | `{"type":"barge_in"}` | Cancels active assistant response tasks. |
 
-The WebSocket `language` query parameter is set by the UI. `auto` selects Groq Whisper language detection, `en-US` selects Deepgram live transcription, and `ml-IN` selects the language-hinted Whisper Large v3 Malayalam path.
+The WebSocket `language` query parameter is set by the UI. `auto` selects Groq Whisper language detection, `en-US` selects Deepgram live transcription, and `ml-IN` selects the Sarvam streaming Malayalam path. Groq Whisper is retained as the Malayalam fallback.
 
 ### Server to client
 
@@ -152,8 +156,9 @@ The WebSocket `language` query parameter is set by the UI. `auto` selects Groq W
 | `user_utterance_received` | `text`, `source`, `turn_id`, optional `stt_latency_ms` | Confirms receipt of a de-duplicated user utterance. |
 | `stt_status` | `provider`, `ready` | Reports the selected transcription path. |
 | `stt_transcript` | `text`, `is_final`, `source` | Sends interim or final transcript updates. |
-| `assistant_token` | `text`, `source`, `turn_id`, optional `ttft_ms` | Streams assistant text. `source` is `semantic_cache` or `groq`. |
-| `assistant_response_end` | `source`, `turn_id`, `total_response_ms` | Marks completion of a response. |
+| `stt_vad` | `source`, `signal` | Sarvam server VAD activity (`START_SPEECH` or `END_SPEECH`) for Malayalam streaming. |
+| `assistant_token` | `text`, `source`, `turn_id`, optional `ttft_ms`, `turn_to_first_token_ms` | Streams assistant text. `source` is `semantic_cache` or `groq`. |
+| `assistant_response_end` | `source`, `turn_id`, `total_response_ms`, optional `full_turn_latency_ms` | Marks completion of a response. |
 | `assistant_interrupted` | `turn_id` | Confirms that barge-in cancelled the active response. |
 | `assistant_error` | `message`, `code`, `turn_id` | Reports a generation error. |
 
@@ -166,7 +171,9 @@ app/
   main.py              FastAPI app and full-duplex WebSocket endpoint
   ai_pipeline.py       AsyncGroq token streaming
   deepgram_stream.py   Async Deepgram Nova-3 streaming transcription
-  groq_stt.py          Async Groq Whisper auto-language transcription
+  groq_stt.py          Async Groq Whisper auto-language transcription/fallback
+  sarvam_stream.py     Async Sarvam 16 kHz PCM Malayalam streaming bridge
+  latency_metrics.py   Bounded percentile latency observations
   semantic_cache.py    MiniLM embeddings and FAISS cache router
   connection_pool.py   Active WebSocket connection tracking
 static/
@@ -177,7 +184,8 @@ static/
 
 - **The assistant returns an error for non-FAQ questions:** verify `GROQ_API_KEY`, then restart Uvicorn.
 - **Auto mode does not transcribe:** grant microphone permission, speak after the one-second room-noise calibration, and pause briefly after each utterance. The browser sends the detected speech turn to Whisper after about 900 ms of silence.
-- **Malayalam is inaccurate:** select **Malayalam — Whisper Large v3 (recommended)**, speak a complete phrase, and pause after it. Do not use Auto mode when Malayalam accuracy is required.
+- **Malayalam is inaccurate:** select **Malayalam — Sarvam live STT (recommended)** in a current Chrome or Edge browser. The server falls back to Groq Whisper only if Sarvam cannot start. Do not use Auto mode when Malayalam accuracy is required.
+- **Malayalam streaming does not start:** verify `SARVAM_API_KEY`, then restart Uvicorn. This route requires browser AudioWorklet support; Chrome or Edge is recommended.
 - **Deepgram cannot connect:** verify `DEEPGRAM_API_KEY`, then restart Uvicorn. The UI will use browser speech recognition as a fallback when supported.
 - **Speech transcription does not start:** grant microphone permission. You can still use the typed message input.
 - **No response after changing `.env`:** restart the server; environment variables are read at startup.

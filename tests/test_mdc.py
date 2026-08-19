@@ -1,5 +1,6 @@
 """No-network tests for Mozilla Data Collective response and safety handling."""
 
+import base64
 import unittest
 
 from app.mdc import (
@@ -9,6 +10,7 @@ from app.mdc import (
     _validate_dataset_id,
 )
 from app.mdc_benchmark import select_common_voice_clips
+from app.sarvam_stream import SarvamLiveTranscriber
 
 
 class MozillaDataCollectiveTests(unittest.TestCase):
@@ -55,3 +57,27 @@ class MozillaDataCollectiveTests(unittest.TestCase):
 
         self.assertEqual(len(selected), 2)
         self.assertEqual({clip.speaker_id for clip in selected}, {"speaker-a", "speaker-b"})
+
+
+class SarvamStreamingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pcm_frames_are_base64_encoded_for_the_provider_socket(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeConnection:
+            async def send_realtime_audio_input(self, message: object) -> None:
+                captured["audio"] = getattr(message, "audio")
+
+        async def noop_transcript(_: str, __: bool) -> None:
+            return None
+
+        async def noop_vad(_: str) -> None:
+            return None
+
+        async def noop_error(_: str) -> None:
+            return None
+
+        transcriber = SarvamLiveTranscriber(noop_transcript, noop_vad, noop_error)
+        transcriber._connection = FakeConnection()
+        await transcriber.send_pcm(b"\x00\x80\xff\x7f")
+
+        self.assertEqual(base64.b64decode(str(captured["audio"])), b"\x00\x80\xff\x7f")
