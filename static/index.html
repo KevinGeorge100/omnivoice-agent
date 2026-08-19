@@ -452,7 +452,12 @@
         }
 
         function startAutoSpeechDetector(stream) {
-            if (!["auto", "ml-IN"].includes(languageSelect.value) || !analyser) return;
+            if (
+                autoVadFrameId ||
+                !["auto", "ml-IN"].includes(languageSelect.value) ||
+                !analyser ||
+                !stream
+            ) return;
 
             const samples = new Uint8Array(analyser.fftSize);
             autoNoiseFloor = 0.008;
@@ -532,7 +537,7 @@
         }
 
         // Speech Recognition Setup
-        function setupSpeechRecognition() {
+        function setupSpeechRecognition(locale = languageSelect.value) {
             const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
             if (!SpeechRecognition) {
                 sttStatusBadge.innerText = "STT: OFF";
@@ -543,7 +548,7 @@
             recognition = new SpeechRecognition();
             recognition.continuous = true;
             recognition.interimResults = true;
-            recognition.lang = languageSelect.value;
+            recognition.lang = locale;
 
             recognition.onstart = () => {
                 sttStatusBadge.innerText = "STT: ON";
@@ -804,7 +809,12 @@
                         showSessionNotice("Audio capture stopped unexpectedly. Reconnect and try again.");
                     };
                     mediaRecorder.start(100); // 100ms packet emission window
-                    startAutoSpeechDetector(stream);
+                    if (
+                        serverSttReady === true &&
+                        ["auto", "ml-IN"].includes(languageSelect.value)
+                    ) {
+                        startAutoSpeechDetector(stream);
+                    }
                     setVoicePhase("Listening");
                 } catch (err) {
                     console.warn("Microphone capture unavailable or muted:", err);
@@ -840,6 +850,7 @@
                             ? "Whisper Large v3 is listening for Malayalam…"
                             : "Auto-detecting English and Malayalam…";
                         setVoicePhase("Listening");
+                        startAutoSpeechDetector(activeMicrophoneStream);
                     } else if (data.ready) {
                         if (recognition) try { recognition.stop(); } catch (e) {}
                         sttStatusBadge.innerText = "STT: DEEPGRAM";
@@ -851,7 +862,7 @@
                         sttStatusBadge.className = "text-[10px] bg-sky-50 text-sky-600 border border-sky-200 px-2 py-0.5 rounded-full font-bold animate-pulse";
                         sttPreview.innerText = data.message || "Using browser speech recognition…";
                         if (data.message) showSessionNotice(data.message, "warning");
-                        setupSpeechRecognition();
+                        setupSpeechRecognition(data.language || "en-US");
                         setVoicePhase("Listening");
                     }
                     return;

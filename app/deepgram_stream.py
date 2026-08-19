@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import os
 from typing import Any
 
 from deepgram import AsyncDeepgramClient
