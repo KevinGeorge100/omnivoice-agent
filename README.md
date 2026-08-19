@@ -2,6 +2,19 @@
 
 OmniVoice Core is a Python prototype for a real-time, full-duplex AI voice agent. It combines a FastAPI WebSocket transport, browser microphone capture, browser speech recognition and synthesis, a FAISS semantic cache, and streamed Groq responses.
 
+## Project vision
+
+OmniVoice is being developed as a **Real-Time AI Voice Agent Infrastructure**, not merely
+as a speech-enabled chat application. Its governing goal is to implement the base paper's
+WebSocket and connection-pooling architecture to achieve sub-500ms latency, introduce a
+standardized conversational evaluation harness, and stream the open-source FD-Bench and
+Fisher Corpus audio datasets through the architecture to create a mathematically provable
+benchmark.
+
+The full preserved vision, research scope, implementation path, and evidence requirements
+are in [Project vision and research path](docs/project_vision.md). This document governs
+future work: latency claims must be reproducible and dataset-driven.
+
 ## What it does
 
 - Streams 100 ms binary WebM audio chunks over a WebSocket.
@@ -58,6 +71,7 @@ Edit `.env` and set your Groq key:
 GROQ_API_KEY=gsk_your_actual_key
 DEEPGRAM_API_KEY=your_actual_deepgram_key
 SARVAM_API_KEY=your_sarvam_key_for_future_malayalam_evaluation
+MDC_API_KEY=your_mozilla_data_collective_key_for_optional_benchmark_data
 ```
 
 Never commit `.env`. It is ignored by Git.
@@ -73,6 +87,18 @@ python scripts/benchmark_stt.py
 ```
 
 See [Malayalam benchmark guide](docs/malayalam_benchmark.md) before recording samples or spending Sarvam credits.
+
+The optional Mozilla Data Collective integration is metadata-only by default and requires
+an explicit, size-capped command before it downloads a benchmark archive. It is never
+used by the live voice session. See the same guide for the safe download workflow.
+
+After an approved dataset download, `scripts/prepare_mdc_benchmark.py` creates a small,
+deterministic transcript-backed subset for a Groq-only first pass. Dataset archives,
+extracted clips, and generated manifests remain outside Git.
+
+This provider-selection benchmark is interim validation only. It does not replace the
+project's required standardized conversational evaluation harness using FD-Bench and
+Fisher Corpus; see [Project vision and research path](docs/project_vision.md).
 
 ## Run locally
 

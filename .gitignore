@@ -12,3 +12,5 @@ __pycache__/
 htmlcov/
 benchmarks/samples/
 benchmarks/results/
+benchmarks/downloads/
+benchmarks/generated/

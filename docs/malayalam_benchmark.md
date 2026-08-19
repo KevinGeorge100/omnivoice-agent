@@ -12,6 +12,55 @@ This benchmark compares Groq Whisper Large v3 with Sarvam Saaras v3 on the same 
 
 Use at least six cases before making a provider decision: two clean, two noisy, and two Malayalam-English code-mixed samples. The included manifest provides eight case slots.
 
+## Optional Mozilla Data Collective reference dataset
+
+The project can inspect the Mozilla Data Collective API for the Malayalam Common Voice
+Scripted Speech 26.0 dataset. This is useful for a standardised reference corpus, but it
+does not replace local, consented noisy and Malayalam-English code-mixed recordings.
+
+Create an API key in Mozilla Data Collective, accept the dataset's terms in its web UI,
+then keep the key locally in `.env`:
+
+```env
+MDC_API_KEY=your_key_here
+```
+
+Inspect only (the default):
+
+```powershell
+python scripts/mdc_dataset.py
+```
+
+This retrieves metadata only. It does **not** create a download session, consume the
+dataset-download allowance, or download any audio.
+
+Downloading is intentionally separate. It requires the exact dataset ID to be repeated
+and applies a 256 MB size limit by default:
+
+```powershell
+python scripts/mdc_dataset.py --download --confirm-dataset-id cmqiglff100innq07ytefmv64
+```
+
+The resulting archive is saved under `benchmarks/downloads/`, which is Git-ignored. Do
+not re-host or commit Mozilla dataset archives. Only extract or select clips after
+reviewing the dataset terms and documenting their references in a separate benchmark
+manifest.
+
+Prepare a deterministic 20-clip subset from the downloaded archive:
+
+```powershell
+python scripts/prepare_mdc_benchmark.py
+```
+
+It selects 2.5-15 second clips from the official test split, prioritises speaker variety,
+copies only those MP3 files to `benchmarks/samples/mdc_common_voice_test/`, and writes a
+transcript-backed manifest under `benchmarks/generated/`. Both locations are Git-ignored.
+Run Groq only for the first review:
+
+```powershell
+python scripts/benchmark_stt.py --manifest benchmarks/generated/malayalam_mdc_test_manifest.jsonl --providers groq --run --max-cases 3
+```
+
 ## Validate without credits
 
 ```powershell
