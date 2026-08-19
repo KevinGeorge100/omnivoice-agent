@@ -1,0 +1,8 @@
+{"id":"ml_clean_01","audio_file":"samples/ml_clean_01.wav","expected_transcript":"","language_code":"ml-IN","sarvam_mode":"transcribe","tags":["malayalam","clean","short"]}
+{"id":"ml_clean_02","audio_file":"samples/ml_clean_02.wav","expected_transcript":"","language_code":"ml-IN","sarvam_mode":"transcribe","tags":["malayalam","clean","conversational"]}
+{"id":"ml_noise_01","audio_file":"samples/ml_noise_01.wav","expected_transcript":"","language_code":"ml-IN","sarvam_mode":"transcribe","tags":["malayalam","background-noise"]}
+{"id":"ml_noise_02","audio_file":"samples/ml_noise_02.wav","expected_transcript":"","language_code":"ml-IN","sarvam_mode":"transcribe","tags":["malayalam","background-noise","multiple-speakers"]}
+{"id":"ml_codemix_01","audio_file":"samples/ml_codemix_01.wav","expected_transcript":"","language_code":"ml-IN","sarvam_mode":"codemix","tags":["malayalam","english-codemix","business"]}
+{"id":"ml_codemix_02","audio_file":"samples/ml_codemix_02.wav","expected_transcript":"","language_code":"ml-IN","sarvam_mode":"codemix","tags":["malayalam","english-codemix","numbers"]}
+{"id":"ml_fast_01","audio_file":"samples/ml_fast_01.wav","expected_transcript":"","language_code":"ml-IN","sarvam_mode":"transcribe","tags":["malayalam","fast-speech"]}
+{"id":"ml_soft_01","audio_file":"samples/ml_soft_01.wav","expected_transcript":"","language_code":"ml-IN","sarvam_mode":"transcribe","tags":["malayalam","soft-speech"]}

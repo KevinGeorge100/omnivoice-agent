@@ -2,6 +2,7 @@ fastapi>=0.110,<1.0
 uvicorn[standard]>=0.30,<1.0
 groq>=1.0,<2.0
 deepgram-sdk>=7.0,<8.0
+sarvamai>=0.1.30,<0.2
 sentence-transformers>=5.0,<6.0
 faiss-cpu>=1.10,<2.0
 numpy>=1.25,<3.0

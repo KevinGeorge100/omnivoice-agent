@@ -64,6 +64,16 @@ Never commit `.env`. It is ignored by Git.
 
 `SARVAM_API_KEY` is reserved for a later Malayalam streaming evaluation and is not used by the current runtime.
 
+## Malayalam benchmark (credit-safe)
+
+The repository includes an offline-first benchmark harness to compare Groq Whisper with Sarvam on the same consented Malayalam samples. It never calls either provider unless `--run` is explicitly added:
+
+```powershell
+python scripts/benchmark_stt.py
+```
+
+See [Malayalam benchmark guide](docs/malayalam_benchmark.md) before recording samples or spending Sarvam credits.
+
 ## Run locally
 
 ```powershell
