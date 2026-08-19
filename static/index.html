@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OmniVoice Core — 20% Transport Baseline & Conversational Telemetry</title>
+
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Plus Jakarta Sans', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+    <style>
+        body {
+            background-color: #f8fafc;
+            background-image:
+                radial-gradient(at 0% 0%, rgba(99, 102, 241, 0.05) 0px, transparent 50%),
+                radial-gradient(at 100% 0%, rgba(14, 165, 233, 0.05) 0px, transparent 50%);
+            background-attachment: fixed;
+        }
+
+        .chat-container::-webkit-scrollbar,
+        .terminal::-webkit-scrollbar {
+            width: 5px;
+        }
+        .chat-container::-webkit-scrollbar-track { background: transparent; }
+        .chat-container::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 4px; }
+        .terminal::-webkit-scrollbar-track { background: transparent; }
+        .terminal::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+
+        @keyframes blink { 50% { opacity: 0; } }
+        @keyframes message-in {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes canvas-glow {
+            0%, 100% { box-shadow: inset 0 0 0 1px rgba(16, 185, 129, 0.08), 0 0 0 rgba(16, 185, 129, 0); }
+            50% { box-shadow: inset 0 0 32px 2px rgba(16, 185, 129, 0.14), 0 0 22px rgba(16, 185, 129, 0.08); }
+        }
+        .message-enter { animation: message-in 220ms ease-out both; }
+        .visualizer-active { animation: canvas-glow 1.8s ease-in-out infinite; }
+        .cursor-blink {
+            display: inline-block;
+            width: 6px;
+            height: 14px;
+            background-color: #6366F1;
+            margin-left: 2px;
+            vertical-align: middle;
+            animation: blink 0.8s infinite;
+        }
+    </style>
+</head>
+<body class="text-slate-700 min-h-screen p-5 md:p-7 flex flex-col gap-5 font-sans">
+
+    <!-- Header Bar with Glassmorphism -->
+    <header class="bg-white/80 backdrop-blur-md border border-white/80 rounded-2xl p-4 md:px-6 shadow-sm flex flex-col sm:flex-row justify-between items-center gap-4">
+        <div class="flex items-center gap-3.5">
+            <div class="w-10 h-10 bg-gradient-to-br from-indigo-500 to-sky-500 rounded-xl flex items-center justify-center text-white shadow-md shadow-indigo-100">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+            </div>
+            <div>
+                <h1 class="text-lg font-bold text-slate-800 tracking-tight">OmniVoice Core</h1>
+                <p class="text-xs text-slate-500 font-medium">Real-Time Full-Duplex AI Voice Agent</p>
+            </div>
+            <span class="ml-2 bg-indigo-50 text-indigo-600 border border-indigo-200/80 px-3 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider">
+                20% Transport Baseline
+            </span>
+        </div>
+        <div class="flex items-center gap-2.5 bg-slate-50 border border-slate-200/60 px-4 py-2 rounded-full text-xs font-semibold text-slate-600 shadow-inner">
+            <div id="statusDot" class="w-2.5 h-2.5 rounded-full bg-rose-500 transition-all duration-300"></div>
+            <span id="statusText">Socket: Idle</span>
+        </div>
+    </header>
+
+    <!-- Top Bento KPI Metrics Row -->
+    <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div class="bg-white/70 backdrop-blur-md border border-white/80 rounded-2xl p-5 shadow-sm hover:shadow-md transition-all flex flex-col justify-between gap-2">
+            <div class="flex justify-between items-center">
+                <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Round-Trip Latency</span>
+                <span class="w-8 h-8 rounded-lg bg-sky-50 text-sky-600 flex items-center justify-center"><svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
+            </div>
+            <div class="text-3xl font-extrabold text-slate-800 font-mono tracking-tight" id="valLatency">-- ms</div>
+            <div class="text-xs font-semibold text-indigo-600 flex items-center gap-1.5">
+                <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+                <span>Target: &lt; 200ms Baseline</span>
+            </div>
+        </div>
+
+        <div class="bg-white/70 backdrop-blur-md border border-white/80 rounded-2xl p-5 shadow-sm hover:shadow-md transition-all flex flex-col justify-between gap-2">
+            <div class="flex justify-between items-center">
+                <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Time-To-First-Token</span>
+                <span class="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center"><svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span>
+            </div>
+            <div class="text-3xl font-extrabold text-slate-800 font-mono tracking-tight" id="valTTFT">-- ms</div>
+            <div class="text-xs font-semibold text-indigo-600" id="valTTFTSource">L0/L1 Cache or LLM</div>
+        </div>
+
+        <div class="bg-white/70 backdrop-blur-md border border-white/80 rounded-2xl p-5 shadow-sm hover:shadow-md transition-all flex flex-col justify-between gap-2">
+            <div class="flex justify-between items-center">
+                <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Stream Throughput</span>
+                <span class="w-8 h-8 rounded-lg bg-violet-50 text-violet-600 flex items-center justify-center"><svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>
+            </div>
+            <div class="text-3xl font-extrabold text-slate-800 font-mono tracking-tight" id="valChunks">0</div>
+            <div class="text-xs font-semibold text-indigo-600" id="valDataRate">100ms Client Audio Chunking</div>
+        </div>
+
+        <div class="bg-white/70 backdrop-blur-md border border-white/80 rounded-2xl p-5 shadow-sm hover:shadow-md transition-all flex flex-col justify-between gap-2">
+            <div class="flex justify-between items-center">
+                <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Transport Endpoint</span>
+                <span class="w-8 h-8 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center"><svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></span>
+            </div>
+            <div class="text-xl font-extrabold text-slate-800 font-mono tracking-tight" id="valSession">/ws/audio</div>
+            <div class="text-xs font-semibold text-slate-500" id="valClientId">ID: Session Pending</div>
+        </div>
+    </section>
+
+    <!-- Balanced workspace: microphone controls and conversation stay aligned at every viewport size. -->
+    <main class="grid grid-cols-1 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] gap-5 items-stretch">
+
+        <!-- Audio Streamer -->
+        <section class="bg-white/90 border border-slate-200/80 rounded-2xl p-5 shadow-sm flex flex-col gap-4 min-h-[31rem]">
+            <div class="flex justify-between items-center">
+                <h3 class="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
+                    <span>🎙️</span> Audio Streamer
+                </h3>
+                <span id="sttStatusBadge" class="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full font-bold border border-slate-200">
+                    STT: OFF
+                </span>
+            </div>
+
+            <!-- Waveform Canvas Container -->
+            <div id="visualizerShell" class="h-40 bg-gradient-to-br from-slate-900 to-slate-800 border border-slate-700 rounded-xl overflow-hidden flex items-center justify-center p-2 relative shadow-inner transition-shadow duration-300">
+                <canvas id="visualizer" class="w-full h-full block"></canvas>
+            </div>
+
+            <p class="text-xs text-slate-500 leading-relaxed">
+                Captures raw microphone audio and streams binary 100ms WebM/PCM packets over WebSocket.
+            </p>
+
+            <!-- Primary Action Buttons -->
+            <div class="flex flex-col gap-2.5 pt-1">
+                <button id="startBtn" class="w-full bg-emerald-500 hover:bg-emerald-600 active:bg-emerald-700 text-white font-semibold py-3 px-4 rounded-xl transition-all shadow-sm shadow-emerald-200 hover:-translate-y-0.5 flex items-center justify-center gap-2 text-xs disabled:opacity-40 disabled:cursor-not-allowed">
+                    <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+                    Start Voice Stream
+                </button>
+                <button id="stopBtn" disabled class="w-full bg-rose-500 hover:bg-rose-600 active:bg-rose-700 text-white font-semibold py-2.5 px-4 rounded-xl transition-all shadow-sm shadow-rose-200 hover:-translate-y-0.5 flex items-center justify-center gap-2 text-xs disabled:opacity-40 disabled:cursor-not-allowed">
+                    <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                    Halt Session
+                </button>
+            </div>
+        </section>
+
+        <!-- AI Conversation Log -->
+        <section class="flex flex-col min-h-[31rem]">
+
+            <!-- Conversational Stream Card with INTEGRATED Chat Input Bar -->
+            <div class="bg-white/90 border border-slate-200/80 rounded-2xl p-6 shadow-sm flex flex-col gap-4 flex-1">
+                <div class="flex justify-between items-center">
+                    <div class="flex items-center gap-2">
+                        <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+                        <h3 class="text-sm font-bold text-slate-800">AI Conversation Log</h3>
+                    </div>
+                    <span class="text-[10px] bg-sky-50 text-sky-600 border border-sky-200/80 px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider">
+                        FastAPI + AsyncIO
+                    </span>
+                </div>
+
+                <!-- Chat Feed -->
+                <div id="chatContainer" class="chat-container flex-1 min-h-64 overflow-y-auto bg-slate-50 border border-slate-200/80 rounded-xl p-4 flex flex-col gap-3 scroll-smooth">
+                    <div class="chat-bubble assistant self-start max-w-[85%] bg-white border border-slate-200/80 rounded-2xl rounded-tl-sm p-3.5 text-xs text-slate-800 shadow-sm flex flex-col gap-1.5">
+                        <div class="bubble-header flex items-center gap-2 text-[11px] text-slate-500 font-bold">
+                            <span>🤖 OmniVoice Agent</span>
+                            <span class="tag-badge text-[10px] uppercase font-bold bg-sky-50 text-sky-600 border border-sky-200/80 px-2 py-0.5 rounded-md">Ready</span>
+                        </div>
+                        <div class="bubble-content text-xs leading-relaxed text-slate-700">
+                            Welcome to the OmniVoice 20% Transport Baseline. Speak into your microphone or send a message using the input bar below.
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Rescued & Integrated Chat Input Bar -->
+                <div class="border-t border-slate-200/80 pt-3">
+                    <div class="flex items-center gap-2">
+                        <input type="text" id="manualUtterance" placeholder="Type a message or utterance (e.g. What are your business hours?)..." class="flex-1 bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm" />
+                        <button id="sendUtteranceBtn" class="bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white font-semibold px-5 py-2.5 rounded-xl text-xs transition-all shadow-sm shadow-indigo-100 flex items-center gap-1.5">
+                            <span>Send</span>
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+        </section>
+
+    </main>
+
+    <!-- Collapsible transport drawer keeps low-level telemetry available without competing with the conversation. -->
+    <details class="group bg-white/90 border border-slate-200/80 rounded-2xl shadow-sm overflow-hidden">
+        <summary class="cursor-pointer list-none flex items-center justify-between gap-3 px-5 py-4 select-none hover:bg-slate-50 transition-colors">
+            <div class="flex items-center gap-2.5">
+                <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span class="text-xs font-mono uppercase tracking-wider text-slate-600 font-bold">Transport Layer Event Telemetry</span>
+                <span class="text-[10px] text-slate-400 font-mono">WebSocket audio ACKs</span>
+            </div>
+            <div class="flex items-center gap-3">
+                <span id="telemetryRate" class="text-xs font-mono text-slate-500 font-semibold">0 KB/s</span>
+                <svg class="w-4 h-4 text-slate-400 transition-transform group-open:rotate-180" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+        </summary>
+        <div class="border-t border-slate-200 bg-slate-50 p-4">
+            <div id="terminal" class="terminal h-36 font-mono text-xs overflow-y-auto space-y-1.5 bg-white p-3.5 rounded-xl border border-slate-200 flex flex-col-reverse text-slate-600">
+                <div class="flex items-center gap-2 py-0.5 border-b border-slate-100 text-slate-500">
+                    <span class="text-sky-600 font-bold">[INFO]</span> Transport baseline set to 20% | Endpoint: /ws/audio
+                </div>
+            </div>
+        </div>
+    </details>
+
+    <script>
+        let ws = null;
+        let mediaRecorder = null;
+        let audioContext = null;
+        let analyser = null;
+        let dataArray = null;
+        let animationFrameId = null;
+        let recognition = null;
+
+        let chunkCount = 0;
+        let totalBytes = 0;
+        let sessionStartTime = 0;
+        let isAiSpeaking = false;
+        let ttsTextBuffer = "";
+
+        const clientId = "node_" + Math.random().toString(36).substr(2, 6);
+
+        let currentAssistantBubble = null;
+        let currentAssistantContent = null;
+        let currentAssistantBadgeContainer = null;
+        let currentCursor = null;
+
+        // Elements
+        const startBtn = document.getElementById("startBtn");
+        const stopBtn = document.getElementById("stopBtn");
+        const statusDot = document.getElementById("statusDot");
+        const statusText = document.getElementById("statusText");
+        const valLatency = document.getElementById("valLatency");
+        const valTTFT = document.getElementById("valTTFT");
+        const valTTFTSource = document.getElementById("valTTFTSource");
+        const valChunks = document.getElementById("valChunks");
+        const valDataRate = document.getElementById("valDataRate");
+        const valSession = document.getElementById("valSession");
+        const valClientId = document.getElementById("valClientId");
+        const chatContainer = document.getElementById("chatContainer");
+        const terminal = document.getElementById("terminal");
+        const canvas = document.getElementById("visualizer");
+        const canvasCtx = canvas.getContext("2d");
+        const visualizerShell = document.getElementById("visualizerShell");
+        const manualUtterance = document.getElementById("manualUtterance");
+        const sendUtteranceBtn = document.getElementById("sendUtteranceBtn");
+        const sttStatusBadge = document.getElementById("sttStatusBadge");
+        const telemetryRate = document.getElementById("telemetryRate");
+
+        valClientId.innerText = "Session ID: " + clientId;
+
+        // Audio Waveform Visualizer
+        function setupVisualizer(stream) {
+            try {
+                const pixelRatio = window.devicePixelRatio || 1;
+                const bounds = canvas.getBoundingClientRect();
+                canvas.width = Math.max(1, Math.floor(bounds.width * pixelRatio));
+                canvas.height = Math.max(1, Math.floor(bounds.height * pixelRatio));
+                canvasCtx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+                const canvasWidth = bounds.width;
+                const canvasHeight = bounds.height;
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaStreamSource(stream);
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 64;
+                source.connect(analyser);
+
+                const bufferLength = analyser.frequencyBinCount;
+                dataArray = new Uint8Array(bufferLength);
+                visualizerShell.classList.add("visualizer-active");
+
+                function draw() {
+                    animationFrameId = requestAnimationFrame(draw);
+                    analyser.getByteFrequencyData(dataArray);
+
+                    canvasCtx.fillStyle = "#0f172a";
+                    canvasCtx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+                    const barWidth = (canvasWidth / bufferLength) * 2.2;
+                    let x = 0;
+
+                    for (let i = 0; i < bufferLength; i++) {
+                        const barHeight = (dataArray[i] / 255) * canvasHeight * 0.85;
+                        const gradient = canvasCtx.createLinearGradient(0, canvasHeight, 0, 0);
+                        gradient.addColorStop(0, '#10b981');
+                        gradient.addColorStop(1, '#38bdf8');
+
+                        canvasCtx.fillStyle = gradient;
+                        canvasCtx.fillRect(x, canvasHeight - barHeight, barWidth - 2, barHeight);
+                        x += barWidth;
+                    }
+                }
+                draw();
+            } catch (err) {
+                console.warn("Visualizer initialization failed:", err);
+            }
+        }
+
+        // Barge-in Handling
+        function handleBargeIn() {
+            const activePlayback = isAiSpeaking || ("speechSynthesis" in window && window.speechSynthesis.speaking);
+            if (activePlayback) {
+                console.log("[BARGE-IN] Interruption detected. Halting playback and notifying server.");
+                cancelTTS();
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: "barge_in" }));
+
+                    const row = document.createElement("div");
+                    row.className = "flex items-center gap-2 py-0.5 border-b border-slate-800/40";
+                    row.innerHTML = `
+                        <span class="bg-rose-500/20 text-rose-400 px-1.5 py-0.5 rounded text-[10px] font-bold">[BARGE-IN]</span>
+                        <span class="text-amber-300">Speech Interruption -> Cancelled In-Flight Tasks</span>
+                    `;
+                    terminal.appendChild(row);
+                }
+            }
+        }
+
+        // Speech Recognition Setup
+        function setupSpeechRecognition() {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SpeechRecognition) {
+                sttStatusBadge.innerText = "STT: OFF";
+                sttStatusBadge.className = "text-[10px] bg-amber-50 text-amber-600 border border-amber-200 px-2 py-0.5 rounded-full font-bold";
+                return;
+            }
+
+            recognition = new SpeechRecognition();
+            recognition.continuous = true;
+            recognition.interimResults = true;
+            recognition.lang = "en-US";
+
+            recognition.onstart = () => {
+                sttStatusBadge.innerText = "STT: ON";
+                sttStatusBadge.className = "text-[10px] bg-emerald-50 text-emerald-600 border border-emerald-200 px-2 py-0.5 rounded-full font-bold animate-pulse";
+            };
+
+            recognition.onspeechstart = () => {
+                handleBargeIn();
+            };
+
+            recognition.onresult = (event) => {
+                handleBargeIn();
+
+                for (let i = event.resultIndex; i < event.results.length; ++i) {
+                    if (event.results[i].isFinal) {
+                        const transcript = event.results[i][0].transcript.trim();
+                        if (transcript) {
+                            sendUserUtterance(transcript);
+                        }
+                    }
+                }
+            };
+
+            recognition.onerror = (event) => {
+                if (event.error !== "no-speech") {
+                    sttStatusBadge.innerText = `STT: ${event.error}`;
+                    sttStatusBadge.className = "text-[10px] bg-rose-50 text-rose-600 border border-rose-200 px-2 py-0.5 rounded-full font-bold";
+                }
+            };
+
+            recognition.onend = () => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    try { recognition.start(); } catch (e) {}
+                } else {
+                    sttStatusBadge.innerText = "STT: OFF";
+                    sttStatusBadge.className = "text-[10px] bg-slate-100 text-slate-500 border border-slate-200 px-2 py-0.5 rounded-full font-bold";
+                }
+            };
+
+            try {
+                recognition.start();
+            } catch (e) {}
+        }
+
+        // Speech Synthesis (TTS)
+        function cancelTTS() {
+            if ("speechSynthesis" in window) {
+                window.speechSynthesis.cancel();
+            }
+            ttsTextBuffer = "";
+            isAiSpeaking = false;
+        }
+
+        function queueSentenceTTS(text) {
+            ttsTextBuffer += text;
+            const sentenceRegex = /([^.!?\n]+[.!?\n]+)/g;
+            let match;
+            let lastIndex = 0;
+
+            while ((match = sentenceRegex.exec(ttsTextBuffer)) !== null) {
+                const sentence = match[0].trim();
+                if (sentence) {
+                    speakSentence(sentence);
+                }
+                lastIndex = sentenceRegex.lastIndex;
+            }
+
+            if (lastIndex > 0) {
+                ttsTextBuffer = ttsTextBuffer.substring(lastIndex);
+            }
+        }
+
+        function flushRemainingTTS() {
+            if (ttsTextBuffer.trim()) {
+                speakSentence(ttsTextBuffer.trim());
+                ttsTextBuffer = "";
+            }
+        }
+
+        function speakSentence(sentence) {
+            if (!("speechSynthesis" in window)) return;
+            const utterance = new SpeechSynthesisUtterance(sentence);
+            utterance.rate = 1.05;
+            utterance.pitch = 1.0;
+            utterance.onstart = () => { isAiSpeaking = true; };
+            utterance.onend = () => {
+                if (!("speechSynthesis" in window) || !window.speechSynthesis.speaking) {
+                    isAiSpeaking = false;
+                }
+            };
+            window.speechSynthesis.speak(utterance);
+        }
+
+        // User Utterance Dispatcher
+        function sendUserUtterance(text) {
+            if (!text) return;
+            handleBargeIn();
+            appendUserBubble(text);
+            prepareAssistantBubble();
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "user_utterance", text: text }));
+            }
+        }
+
+        function appendUserBubble(text) {
+            const bubble = document.createElement("div");
+            bubble.className = "chat-bubble message-enter user self-end max-w-[85%] bg-indigo-50/80 border border-indigo-200/60 rounded-2xl rounded-tr-sm p-3.5 text-xs text-slate-800 shadow-sm flex flex-col gap-1";
+            bubble.innerHTML = `
+                <div class="bubble-header flex items-center gap-2 text-[11px] text-slate-500 font-bold">
+                    <span>👤 Caller</span>
+                </div>
+                <div class="bubble-content text-xs leading-relaxed text-slate-800">${escapeHtml(text)}</div>
+            `;
+            chatContainer.appendChild(bubble);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function prepareAssistantBubble() {
+            if (currentCursor) currentCursor.remove();
+
+            currentAssistantBubble = document.createElement("div");
+            currentAssistantBubble.className = "chat-bubble message-enter assistant self-start max-w-[85%] bg-white border border-slate-200/80 rounded-2xl rounded-tl-sm p-3.5 text-xs text-slate-800 shadow-sm flex flex-col gap-1.5";
+            currentAssistantBubble.innerHTML = `
+                <div class="bubble-header flex items-center gap-2 text-[11px] text-slate-500 font-bold">
+                    <span>🤖 OmniVoice Agent</span>
+                    <div class="badge-container flex gap-1"></div>
+                </div>
+                <div class="bubble-content text-xs leading-relaxed text-slate-700"></div>
+            `;
+
+            chatContainer.appendChild(currentAssistantBubble);
+            currentAssistantContent = currentAssistantBubble.querySelector(".bubble-content");
+            currentAssistantBadgeContainer = currentAssistantBubble.querySelector(".badge-container");
+
+            currentCursor = document.createElement("span");
+            currentCursor.className = "cursor-blink";
+            currentAssistantContent.appendChild(currentCursor);
+
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function appendAssistantToken(data) {
+            if (!currentAssistantContent) {
+                prepareAssistantBubble();
+            }
+
+            if (data.ttft_ms !== undefined) {
+                valTTFT.innerText = data.ttft_ms + " ms";
+                valTTFT.className = data.source === "semantic_cache" ? "text-3xl font-extrabold text-purple-600 font-mono tracking-tight" : "text-3xl font-extrabold text-emerald-600 font-mono tracking-tight";
+
+                if (data.source === "semantic_cache") {
+                    valTTFTSource.innerText = "Semantic Cache (<20ms)";
+                    currentAssistantBadgeContainer.innerHTML = `
+                        <span class="bg-purple-50 text-purple-600 border border-purple-200/80 px-2 py-0.5 rounded text-[10px] font-bold uppercase">Cache Hit &lt;20ms</span>
+                        <span class="bg-emerald-50 text-emerald-600 border border-emerald-200/80 px-2 py-0.5 rounded text-[10px] font-bold uppercase">${data.ttft_ms}ms</span>
+                    `;
+                } else {
+                    valTTFTSource.innerText = "Groq Llama-3.1";
+                    currentAssistantBadgeContainer.innerHTML = `
+                        <span class="bg-sky-50 text-sky-600 border border-sky-200/80 px-2 py-0.5 rounded text-[10px] font-bold uppercase">Groq Llama-3.1</span>
+                        <span class="bg-emerald-50 text-emerald-600 border border-emerald-200/80 px-2 py-0.5 rounded text-[10px] font-bold uppercase">TTFT ${data.ttft_ms}ms</span>
+                    `;
+                }
+            }
+
+            const tokenNode = document.createTextNode(data.text);
+            if (currentCursor && currentCursor.parentNode === currentAssistantContent) {
+                currentAssistantContent.insertBefore(tokenNode, currentCursor);
+            } else {
+                currentAssistantContent.appendChild(tokenNode);
+            }
+
+            queueSentenceTTS(data.text);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function finalizeAssistantBubble() {
+            if (currentCursor) {
+                currentCursor.remove();
+                currentCursor = null;
+            }
+            flushRemainingTTS();
+            currentAssistantBubble = null;
+            currentAssistantContent = null;
+            currentAssistantBadgeContainer = null;
+        }
+
+        // Manual Utterance Input
+        sendUtteranceBtn.onclick = () => {
+            const text = manualUtterance.value.trim();
+            if (text) {
+                sendUserUtterance(text);
+                manualUtterance.value = "";
+            }
+        };
+
+        manualUtterance.onkeydown = (e) => {
+            if (e.key === "Enter") {
+                sendUtteranceBtn.click();
+            }
+        };
+
+        // Start Voice Session
+        startBtn.onclick = async () => {
+            const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+            ws = new WebSocket(`${protocol}//${location.host}/ws/audio/${clientId}`);
+            sessionStartTime = Date.now();
+
+            ws.onopen = async () => {
+                statusDot.className = "w-2.5 h-2.5 rounded-full bg-emerald-500 ring-4 ring-emerald-100 animate-pulse shadow-[0_0_10px_#10b981] transition-all duration-300";
+                statusText.innerText = "Full-Duplex WS Active";
+                statusText.className = "text-emerald-600 font-bold";
+                valSession.innerText = "/ws/audio";
+                valSession.className = "text-xl font-extrabold text-emerald-600 font-mono tracking-tight";
+
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    setupVisualizer(stream);
+
+                    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+                    mediaRecorder.ondataavailable = (event) => {
+                        if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) {
+                            ws.send(event.data);
+                            chunkCount++;
+                            valChunks.innerText = chunkCount;
+                        }
+                    };
+                    mediaRecorder.start(100); // 100ms packet emission window
+                } catch (err) {
+                    console.warn("Microphone capture unavailable or muted:", err);
+                }
+
+                setupSpeechRecognition();
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+
+                // Per-chunk streaming ACK
+                if (data.status === "streaming") {
+                    totalBytes = data.bytes_received;
+                    valLatency.innerText = data.latency_ms + " ms";
+
+                    const elapsedSec = (Date.now() - sessionStartTime) / 1000;
+                    const rateKBps = (totalBytes / 1024 / (elapsedSec || 1)).toFixed(1);
+                    valDataRate.innerText = `${(totalBytes / 1024).toFixed(1)} KB Total (${rateKBps} KB/s)`;
+                    telemetryRate.innerText = `${rateKBps} KB/s`;
+
+                    if (data.latency_ms < 150) {
+                        valLatency.className = "text-3xl font-extrabold text-emerald-600 font-mono tracking-tight";
+                    } else if (data.latency_ms < 300) {
+                        valLatency.className = "text-3xl font-extrabold text-amber-500 font-mono tracking-tight";
+                    } else {
+                        valLatency.className = "text-3xl font-extrabold text-rose-500 font-mono tracking-tight";
+                    }
+
+                    const row = document.createElement("div");
+                    row.className = "flex items-center gap-3 py-0.5 border-b border-slate-800/40";
+                    row.innerHTML = `
+                        <span class="bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded text-[10px] font-bold">[ACK #${chunkCount}]</span>
+                        <span class="bg-sky-500/20 text-sky-400 px-1.5 py-0.5 rounded text-[10px] font-bold">${data.latency_ms}ms</span>
+                        <span class="text-slate-400">[+${data.chunk_size}B] Streamed: ${data.bytes_received}B</span>
+                    `;
+                    terminal.appendChild(row);
+                    return;
+                }
+
+                if (data.type === "assistant_token") {
+                    appendAssistantToken(data);
+                } else if (data.type === "assistant_response_end") {
+                    finalizeAssistantBubble();
+                } else if (data.type === "assistant_error") {
+                    if (currentAssistantContent) {
+                        currentAssistantContent.innerText = "Error: " + data.message;
+                    }
+                    finalizeAssistantBubble();
+                }
+            };
+
+            ws.onclose = () => {
+                resetUI();
+            };
+        };
+
+        stopBtn.onclick = () => {
+            if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+            if (recognition) try { recognition.stop(); } catch(e){}
+            cancelTTS();
+            if (ws) ws.close();
+            resetUI();
+        };
+
+        function resetUI() {
+            statusDot.className = "w-2.5 h-2.5 rounded-full bg-rose-500 transition-all duration-300";
+            statusText.innerText = "Socket: Closed";
+            statusText.className = "text-slate-500 font-semibold";
+            valSession.innerText = "/ws/audio";
+            valSession.className = "text-xl font-extrabold text-slate-800 font-mono tracking-tight";
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            sttStatusBadge.innerText = "STT: OFF";
+            sttStatusBadge.className = "text-[10px] bg-slate-100 text-slate-500 border border-slate-200 px-2 py-0.5 rounded-full font-bold";
+
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+            if (audioContext && audioContext.state !== "closed") audioContext.close();
+            visualizerShell.classList.remove("visualizer-active");
+
+            canvasCtx.fillStyle = "#0F172A";
+            canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        function escapeHtml(str) {
+            return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        }
+    </script>
+</body>
+</html>
