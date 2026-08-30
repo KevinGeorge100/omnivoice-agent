@@ -68,8 +68,12 @@ class SarvamLiveTranscriber:
         """Send one signed 16-bit little-endian mono PCM frame without blocking the loop."""
         if self._connection is None or not audio_chunk:
             return
-        encoded_audio = base64.b64encode(audio_chunk).decode("ascii")
-        await self._connection.send_realtime_audio_input(RealtimeAudioInput(audio=encoded_audio))
+        try:
+            encoded_audio = base64.b64encode(audio_chunk).decode("ascii")
+            await self._connection.send_realtime_audio_input(RealtimeAudioInput(audio=encoded_audio))
+        except Exception:
+            # Connection closed or socket write failed during streaming
+            pass
 
     async def _receive_messages(self) -> None:
         assert self._connection is not None

@@ -221,6 +221,7 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
     send_lock = asyncio.Lock()
     response_tasks: set[asyncio.Task[None]] = set()
     transcription_tasks: set[asyncio.Task[None]] = set()
+    stream_tasks: set[asyncio.Task[None]] = set()
     transcriber: DeepgramLiveTranscriber | None = None
     sarvam_transcriber: SarvamLiveTranscriber | None = None
     stt_language = websocket.query_params.get("language", "en-US")
@@ -230,6 +231,23 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
     transcript_deduplicator = TranscriptDeduplicator()
     turn_id = 0
     sarvam_speech_started_at: float | None = None
+
+    async def dispatch_sarvam_pcm(pcm_bytes: bytes) -> None:
+        if sarvam_transcriber is not None:
+            await sarvam_transcriber.send_pcm(pcm_bytes)
+
+    async def dispatch_deepgram_webm(webm_bytes: bytes) -> None:
+        if transcriber is not None:
+            await transcriber.send_audio(webm_bytes)
+
+    async def send_transport_ack(bytes_total: int, chunk_sz: int, latency: float) -> None:
+        try:
+            async with send_lock:
+                await websocket.send_text(
+                    f'{{"status": "streaming", "bytes_received": {bytes_total}, "chunk_size": {chunk_sz}, "latency_ms": {round(latency, 2)}}}'
+                )
+        except (RuntimeError, WebSocketDisconnect):
+            pass
 
     async def begin_assistant_response(
         transcript: str,
@@ -531,6 +549,7 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
                     logger.info("Barge-in received from client %s. Cancelling response tasks.", client_id)
                     await cancel_and_wait(response_tasks)
                     await cancel_and_wait(transcription_tasks)
+                    await cancel_and_wait(stream_tasks)
                     async with send_lock:
                         await websocket.send_json(
                             {"type": "assistant_interrupted", "turn_id": turn_id}
@@ -553,10 +572,19 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
             audio_chunk = message.get("bytes")
             if audio_chunk is None:
                 continue
+
+            # Central Routing Dispatcher: low-cost binary parsing & non-blocking dispatch
             if audio_chunk.startswith(SARVAM_PCM_FRAME_PREFIX):
                 if sarvam_transcriber is not None:
-                    await sarvam_transcriber.send_pcm(audio_chunk[len(SARVAM_PCM_FRAME_PREFIX) :])
+                    pcm_bytes = audio_chunk[len(SARVAM_PCM_FRAME_PREFIX) :]
+                    task = asyncio.create_task(
+                        dispatch_sarvam_pcm(pcm_bytes),
+                        name=f"sarvam-pcm-dispatch-{client_id}",
+                    )
+                    stream_tasks.add(task)
+                    task.add_done_callback(stream_tasks.discard)
                 continue
+
             if pending_utterance_mime is not None:
                 mime_type = pending_utterance_mime
                 pending_utterance_mime = None
@@ -570,22 +598,32 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
                 transcription_tasks.add(task)
                 task.add_done_callback(transcription_tasks.discard)
                 continue
+
             if transcriber is not None:
-                await transcriber.send_audio(audio_chunk)
+                task = asyncio.create_task(
+                    dispatch_deepgram_webm(audio_chunk),
+                    name=f"deepgram-webm-dispatch-{client_id}",
+                )
+                stream_tasks.add(task)
+                task.add_done_callback(stream_tasks.discard)
+
             chunk_size = len(audio_chunk)
             total_bytes_received += chunk_size
 
             elapsed_ms = (time.time() - start_time) * 1000
-
-            async with send_lock:
-                await websocket.send_text(
-                    f'{{"status": "streaming", "bytes_received": {total_bytes_received}, "chunk_size": {chunk_size}, "latency_ms": {round(elapsed_ms, 2)}}}'
-                )
             start_time = time.time()
+
+            ack_task = asyncio.create_task(
+                send_transport_ack(total_bytes_received, chunk_size, elapsed_ms),
+                name=f"transport-ack-{client_id}",
+            )
+            stream_tasks.add(ack_task)
+            ack_task.add_done_callback(stream_tasks.discard)
 
     except WebSocketDisconnect:
         pass
     finally:
+        await cancel_and_wait(stream_tasks)
         if transcriber is not None:
             await transcriber.close()
         if sarvam_transcriber is not None:
