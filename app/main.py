@@ -298,7 +298,7 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
         session_state.track_response(task)
 
     async def handle_deepgram_transcript(transcript: str, is_final: bool) -> None:
-        """Relay interim text to the UI and route completed utterances to the agent."""
+        """Relay interim text to the UI and route completed utterances to the agent via arbitrator."""
         async with send_lock:
             await websocket.send_json(
                 {
@@ -309,7 +309,11 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
                 }
             )
         if is_final:
-            await begin_assistant_response(transcript, source="deepgram")
+            await session_state.arbiter.process_final_transcript(
+                transcript,
+                source="deepgram",
+                on_accepted=begin_assistant_response,
+            )
 
     async def handle_sarvam_vad(signal_type: str) -> None:
         """Use Sarvam server VAD for a responsive Malayalam turn boundary and barge-in."""
@@ -332,7 +336,7 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
         transcript: str,
         is_final: bool,
     ) -> None:
-        """Relay partial Saaras text and route completed turns into the cache/LLM pipeline."""
+        """Relay partial Saaras text and route completed turns into the cache/LLM pipeline via arbitrator."""
         if not is_final:
             async with send_lock:
                 await websocket.send_json(
@@ -358,9 +362,10 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
                     "source": "sarvam",
                 }
             )
-        await begin_assistant_response(
+        await session_state.arbiter.process_final_transcript(
             transcript,
             source="sarvam",
+            on_accepted=begin_assistant_response,
             stt_latency_ms=stt_latency_ms,
             turn_started_at=sarvam_speech_started_at,
         )

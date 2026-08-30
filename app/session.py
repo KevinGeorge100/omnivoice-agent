@@ -121,11 +121,15 @@ async def cancel_and_wait(tasks: set[asyncio.Task[None]]) -> None:
     tasks.clear()
 
 
+from app.arbitrator import TurnBoundaryArbiter
+
+
 class SessionState:
     """Centralized atomic turn state and task tracking manager for one client session."""
 
     def __init__(self, client_id: str) -> None:
         self.client_id = client_id
+        self.arbiter = TurnBoundaryArbiter()
         self.response_tasks: set[asyncio.Task[None]] = set()
         self.transcription_tasks: set[asyncio.Task[None]] = set()
         self.stream_tasks: set[asyncio.Task[None]] = set()
