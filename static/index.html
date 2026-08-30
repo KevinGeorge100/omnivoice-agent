@@ -280,6 +280,8 @@
         let activeSttProvider = null;
         let sarvamPcmNode = null;
         let sarvamPcmModuleUrl = null;
+        let audioPlaybackQueue = [];
+        let audioPlaybackBusy = false;
 
         const MAX_RECONNECT_ATTEMPTS = 3;
 
@@ -810,6 +812,54 @@
             chatContainer.scrollTop = chatContainer.scrollHeight;
         }
 
+        function decodeAudioChunkFromBase64(audioB64, format = "pcm_s16le", sampleRate = 16000) {
+            if (!audioB64) return null;
+
+            const raw = atob(audioB64);
+            const bytes = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i += 1) {
+                bytes[i] = raw.charCodeAt(i);
+            }
+
+            if (format.includes("pcm") || format === "pcm_s16le") {
+                const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+                const buffer = new AudioBuffer({
+                    length: int16.length,
+                    sampleRate: sampleRate,
+                    numberOfChannels: 1,
+                });
+                const channelData = buffer.getChannelData(0);
+                for (let i = 0; i < int16.length; i += 1) {
+                    channelData[i] = int16[i] / 32768;
+                }
+                return buffer;
+            }
+
+            return null;
+        }
+
+        async function playQueuedAudioChunk(data) {
+            if (!data || !data.audio_b64) return;
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioContext.state === "suspended") {
+                await audioContext.resume();
+            }
+
+            const audioBuffer = decodeAudioChunkFromBase64(
+                data.audio_b64,
+                data.format || "pcm_s16le",
+                Number(data.sample_rate || 16000)
+            );
+            if (!audioBuffer) return;
+
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+            source.start();
+        }
+
         function finalizeAssistantBubble() {
             if (currentCursor) {
                 currentCursor.remove();
@@ -1039,6 +1089,13 @@
                         <span class="text-slate-400">[+${data.chunk_size}B] Streamed: ${data.bytes_received}B</span>
                     `;
                     terminal.appendChild(row);
+                    return;
+                }
+
+                if (data.type === "audio_chunk") {
+                    playQueuedAudioChunk(data).catch((error) => {
+                        console.warn("Audio chunk playback failed:", error);
+                    });
                     return;
                 }
 

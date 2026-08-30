@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^python -c \"from pptx import Presentation; p = Presentation\\(r'C:\\\\Users\\\\Asus\\\\Downloads\\\\OmniVoice-Review 1 \\(20%\\)\\.pptx'\\); print\\('slides=', len\\(p\\.slides\\)\\);\nfor i, slide in enumerate\\(p\\.slides, 1\\):\n    print\\('--- SLIDE', i, '---'\\)\n    for shape in slide\\.shapes:\n        if hasattr\\(shape, 'text'\\) and shape\\.text\\.strip\\(\\):\n            text = shape\\.text\\.replace\\(chr\\(10\\), ' \\| '\\)\n            print\\(f'\\[\\{shape\\.name\\}\\] \\{text\\[:600\\]\\}'\\)\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

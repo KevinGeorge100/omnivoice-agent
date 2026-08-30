@@ -13,6 +13,7 @@ from app.latency_metrics import TurnLatencyRecord, latency_metrics
 from app.sarvam_stream import SarvamLiveTranscriber
 from app.semantic_cache import semantic_cache
 from app.session import TranscriptDeduplicator, cancel_and_wait
+from app.tts_stream import cartesia_tts
 
 app = FastAPI(title="OmniVoice Core Transport Layer")
 logger = logging.getLogger(__name__)
@@ -159,6 +160,9 @@ async def stream_assistant_response(
                 logger.info("LLM TTFT: %.2f ms", ttft_ms)
                 first_token_sent = True
 
+            if cartesia_tts.is_configured():
+                await cartesia_tts.process_token(token, websocket, turn_id=turn_id)
+
             async with send_lock:
                 payload = {
                     "type": "assistant_token",
@@ -171,6 +175,9 @@ async def stream_assistant_response(
                     if turn_started_at is not None:
                         payload["turn_to_first_token_ms"] = turn_latency_ms()
                 await websocket.send_json(payload)
+
+        if cartesia_tts.is_configured():
+            await cartesia_tts.flush_remaining(websocket, turn_id=turn_id)
 
         response_latency_ms = (time.perf_counter() - started_at) * 1000
         async with send_lock:
