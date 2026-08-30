@@ -180,6 +180,23 @@ class CartesiaTTSStreamer:
         if socket is None:
             return
 
+        is_socket_open = False
+        try:
+            if hasattr(socket, "closed"):
+                is_socket_open = not socket.closed
+            elif hasattr(socket, "open"):
+                is_socket_open = bool(socket.open)
+            else:
+                is_socket_open = True
+        except Exception:
+            is_socket_open = False
+
+        if not is_socket_open:
+            async with self._socket_lock:
+                if self._socket is socket:
+                    self._socket = None
+            return
+
         try:
             await socket.send(json.dumps(request))
             async for message in socket:
@@ -205,7 +222,7 @@ class CartesiaTTSStreamer:
         except asyncio.CancelledError:
             logger.info("Cartesia TTS streaming task cancelled due to barge-in; sending cancel frame.")
             try:
-                if socket is not None:
+                if socket is not None and getattr(socket, "open", True) and not getattr(socket, "closed", False):
                     await socket.send(json.dumps({"type": "cancel", "context_id": "barge_in"}))
             except Exception:
                 pass
