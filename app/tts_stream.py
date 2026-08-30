@@ -37,6 +37,8 @@ class CartesiaTTSStreamer:
         self._sequence = 0
         self._send_lock = asyncio.Lock()
         self._buffer: dict[str, str] = {}
+        self._socket = None
+        self._socket_lock = asyncio.Lock()
 
     @staticmethod
     def is_configured() -> bool:
@@ -45,6 +47,32 @@ class CartesiaTTSStreamer:
     @property
     def configured(self) -> bool:
         return bool(self.api_key and self.voice_id)
+
+    async def _get_connection(self):
+        """Get or establish a long-lived persistent WebSocket connection to Cartesia."""
+        if not self.configured:
+            return None
+        async with self._socket_lock:
+            if self._socket is not None:
+                is_open = False
+                if hasattr(self._socket, "closed"):
+                    is_open = not self._socket.closed
+                elif hasattr(self._socket, "open"):
+                    is_open = bool(self._socket.open)
+                else:
+                    is_open = True
+                if is_open:
+                    return self._socket
+
+            headers = {"X-API-Key": self.api_key}
+            try:
+                self._socket = await websockets.connect(
+                    _DEFAULT_CARTESIA_URL, additional_headers=headers
+                )
+                return self._socket
+            except Exception:
+                self._socket = None
+                return None
 
     def _flush_trigger(self, text: str) -> bool:
         if len(text) >= 80 and any(token in text for token in (",", ";", ":")):
@@ -105,7 +133,6 @@ class CartesiaTTSStreamer:
         if not text or not self.configured:
             return
 
-        headers = {"X-API-Key": self.api_key}
         request = {
             "model_id": self.model_id,
             "voice": {"mode": "id", "id": self.voice_id},
@@ -117,7 +144,11 @@ class CartesiaTTSStreamer:
             },
         }
 
-        async with websockets.connect(_DEFAULT_CARTESIA_URL, additional_headers=headers) as socket:
+        socket = await self._get_connection()
+        if socket is None:
+            return
+
+        try:
             await socket.send(json.dumps(request))
             async for message in socket:
                 if isinstance(message, bytes):
@@ -139,6 +170,11 @@ class CartesiaTTSStreamer:
                         yield audio_bytes
                 if payload.get("type") in {"done", "final", "completed"}:
                     break
+        except Exception:
+            async with self._socket_lock:
+                if self._socket is socket:
+                    self._socket = None
+            raise
 
     async def stream_tokens(
         self,
@@ -168,6 +204,17 @@ class CartesiaTTSStreamer:
                     await self.send_audio_chunk(websocket, audio, turn_id=turn_id)
         except Exception:
             return
+
+    async def close(self) -> None:
+        """Close the persistent Cartesia WebSocket connection cleanly."""
+        async with self._socket_lock:
+            if self._socket is not None:
+                try:
+                    await self._socket.close()
+                except Exception:
+                    pass
+                finally:
+                    self._socket = None
 
 
 cartesia_tts = CartesiaTTSStreamer()

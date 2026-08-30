@@ -66,22 +66,30 @@ class SemanticCacheRouter:
         """Preload the model and the seeded FAQ vectors during application startup."""
         await self._initialize()
 
+    def _sync_search(self, vector: np.ndarray) -> tuple[float, int]:
+        """Perform FAISS index search synchronously off the event loop thread."""
+        assert self._index is not None
+        scores, indexes = self._index.search(vector, 1)
+        return float(scores[0][0]), int(indexes[0][0])
+
+    def _sync_add(self, vector: np.ndarray, response: str) -> None:
+        """Perform FAISS index addition synchronously off the event loop thread."""
+        assert self._index is not None
+        self._index.add(vector)
+        self._responses.append(response)
+
     async def add_to_cache(self, query: str, response: str) -> None:
         """Add a query and its response to the semantic cache."""
         vector = await self._encode([query])
         async with self._index_lock:
-            assert self._index is not None
-            self._index.add(vector)
-            self._responses.append(response)
+            await asyncio.to_thread(self._sync_add, vector, response)
 
     async def lookup(self, query: str) -> str | None:
         """Return the nearest cached response when it meets the similarity threshold."""
         vector = await self._encode([query])
         async with self._index_lock:
             assert self._index is not None
-            scores, indexes = self._index.search(vector, 1)
-            similarity = float(scores[0][0])
-            response_index = int(indexes[0][0])
+            similarity, response_index = await asyncio.to_thread(self._sync_search, vector)
 
             if similarity < self.similarity_threshold or response_index < 0:
                 return None
