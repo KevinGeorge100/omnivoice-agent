@@ -14,3 +14,16 @@ benchmarks/samples/
 benchmarks/results/
 benchmarks/downloads/
 benchmarks/generated/
+.tmp_*/
+*.layout
+*.ppt
+*.pptx
+deck-*.png
+deck-*.json
+design-notes.*
+build_status_*
+inspect.ndjson
+slide-*.layout
+slide-*.png
+source-notes.*
+omnivoice-server.*.log

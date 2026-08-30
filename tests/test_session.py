@@ -1,7 +1,11 @@
 import asyncio
 import unittest
 
-from app.session import TranscriptDeduplicator, cancel_and_wait
+from app.session import (
+    TranscriptDeduplicator,
+    cancel_and_wait,
+    should_process_transcript,
+)
 
 
 class SessionGuardTests(unittest.IsolatedAsyncioTestCase):
@@ -11,6 +15,12 @@ class SessionGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(guard.accept("Hello, OmniVoice"))
         self.assertFalse(guard.accept("  hello,   omnivoice  "))
         self.assertTrue(guard.accept("A different question"))
+
+    async def test_incomplete_utterance_is_blocked(self) -> None:
+        self.assertFalse(should_process_transcript("I want to"))
+        self.assertFalse(should_process_transcript("The flight from Kochi to"))
+        self.assertTrue(should_process_transcript("Please tell me the price of the tickets"))
+        self.assertTrue(should_process_transcript("What is the nearest bus stop?"))
 
     async def test_cancel_and_wait_cleans_up_tasks(self) -> None:
         cancelled = asyncio.Event()

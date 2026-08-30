@@ -270,6 +270,9 @@
         let autoSilenceStartedAt = null;
         let autoVadStartedAt = 0;
         let autoNoiseFloor = 0.008;
+        let browserSpeechDetected = false;
+        let browserSpeechStartedAt = 0;
+        let browserSilenceStartedAt = null;
         let activeMicrophoneStream = null;
         let isStoppingSession = false;
         let activeTurnId = null;
@@ -547,6 +550,9 @@
             const samples = new Uint8Array(analyser.fftSize);
             autoNoiseFloor = 0.008;
             autoVadStartedAt = performance.now();
+            browserSpeechDetected = false;
+            browserSpeechStartedAt = 0;
+            browserSilenceStartedAt = null;
 
             const monitor = () => {
                 autoVadFrameId = requestAnimationFrame(monitor);
@@ -561,43 +567,60 @@
                 const rms = Math.sqrt(energy / samples.length);
                 const now = performance.now();
 
-                // Calibrate to the caller's room noise for the first second, then adapt only while idle.
+                // Keep the browser only as a live signal monitor. The actual turn boundary is decided by the
+                // server-side VAD / STT provider, not by raw volume thresholding.
                 if (now - autoVadStartedAt < 1000) {
                     autoNoiseFloor = (autoNoiseFloor * 0.85) + (rms * 0.15);
                     return;
                 }
-                if (!autoCaptureActive) {
-                    autoNoiseFloor = (autoNoiseFloor * 0.98) + (rms * 0.02);
-                }
 
+                autoNoiseFloor = (autoNoiseFloor * 0.98) + (rms * 0.02);
                 const speechThreshold = Math.max(0.012, autoNoiseFloor * 2.6);
                 const silenceThreshold = Math.max(0.008, autoNoiseFloor * 1.65);
 
-                if (!autoCaptureActive && rms > speechThreshold) {
-                    startAutoUtteranceRecorder(stream);
+                if (rms > speechThreshold) {
+                    if (!browserSpeechDetected) {
+                        browserSpeechDetected = true;
+                        browserSpeechStartedAt = now;
+                        sttPreview.innerText = "Detected speech — waiting for server-side turn boundary…";
+                    }
+                    browserSilenceStartedAt = null;
                     return;
                 }
 
-                if (!autoCaptureActive) return;
-
-                const utteranceAge = now - autoSpeechStartedAt;
-                if (rms < silenceThreshold) {
-                    autoSilenceStartedAt ??= now;
-                    if (
-                        utteranceAge >= AUTO_VAD_MIN_UTTERANCE_MS &&
-                        now - autoSilenceStartedAt >= AUTO_VAD_SILENCE_MS
-                    ) {
-                        stopAutoUtteranceRecorder();
+                if (browserSpeechDetected) {
+                    browserSilenceStartedAt ??= now;
+                    const speechAge = now - browserSpeechStartedAt;
+                    if (speechAge >= AUTO_VAD_MIN_UTTERANCE_MS && rms < silenceThreshold) {
+                        if (now - browserSilenceStartedAt >= AUTO_VAD_SILENCE_MS) {
+                            sttPreview.innerText = "Voice stream active — awaiting final server VAD decision…";
+                            browserSpeechDetected = false;
+                            browserSpeechStartedAt = 0;
+                            browserSilenceStartedAt = null;
+                        }
+                    } else {
+                        browserSilenceStartedAt = null;
                     }
-                } else {
-                    autoSilenceStartedAt = null;
                 }
 
-                if (utteranceAge >= AUTO_VAD_MAX_UTTERANCE_MS) {
-                    stopAutoUtteranceRecorder();
+                if (browserSpeechDetected && now - browserSpeechStartedAt >= AUTO_VAD_MAX_UTTERANCE_MS) {
+                    browserSpeechDetected = false;
+                    browserSpeechStartedAt = 0;
+                    browserSilenceStartedAt = null;
                 }
             };
             monitor();
+        }
+
+        function stopSpeechMonitoring() {
+            if (autoVadFrameId) cancelAnimationFrame(autoVadFrameId);
+            autoVadFrameId = null;
+            browserSpeechDetected = false;
+            browserSpeechStartedAt = 0;
+            browserSilenceStartedAt = null;
+            autoCaptureActive = false;
+            autoSilenceStartedAt = null;
+            autoVadStartedAt = 0;
         }
 
         // Barge-in Handling
@@ -951,6 +974,7 @@
                         startAutoSpeechDetector(stream);
                     }
                     setVoicePhase("Listening");
+                    sttPreview.innerText = "Streaming audio continuously — awaiting server-side VAD…";
                 } catch (err) {
                     console.warn("Microphone capture unavailable or muted:", err);
                     sttPreview.innerText = "Microphone access is required for voice transcription.";
@@ -998,6 +1022,7 @@
                             : "Auto-detecting English and Malayalam…";
                         setVoicePhase("Listening");
                         startAutoSpeechDetector(activeMicrophoneStream);
+                        sttPreview.innerText = "Streaming audio continuously — awaiting server-side VAD…";
                     } else if (data.ready) {
                         if (recognition) try { recognition.stop(); } catch (e) {}
                         sttStatusBadge.innerText = "STT: DEEPGRAM";
@@ -1169,7 +1194,7 @@
             setVoicePhase("Idle");
 
             if (animationFrameId) cancelAnimationFrame(animationFrameId);
-            if (autoVadFrameId) cancelAnimationFrame(autoVadFrameId);
+            stopSpeechMonitoring();
             autoVadFrameId = null;
             autoCaptureActive = false;
             autoSilenceStartedAt = null;

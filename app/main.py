@@ -12,7 +12,7 @@ from app.groq_stt import GroqWhisperTranscriber
 from app.latency_metrics import TurnLatencyRecord, latency_metrics
 from app.sarvam_stream import SarvamLiveTranscriber
 from app.semantic_cache import semantic_cache
-from app.session import TranscriptDeduplicator, cancel_and_wait
+from app.session import TranscriptDeduplicator, cancel_and_wait, should_process_transcript
 from app.tts_stream import cartesia_tts
 
 app = FastAPI(title="OmniVoice Core Transport Layer")
@@ -239,7 +239,17 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
     ) -> None:
         """Cancel any active turn and start a response for one final transcript."""
         nonlocal turn_id
-        if not transcript_deduplicator.accept(transcript):
+        cleaned_transcript = str(transcript or "").strip()
+        if not cleaned_transcript:
+            return
+        if not should_process_transcript(cleaned_transcript):
+            logger.info(
+                "Delayed incomplete transcript for client %s: %r",
+                client_id,
+                cleaned_transcript,
+            )
+            return
+        if not transcript_deduplicator.accept(cleaned_transcript):
             logger.info("Ignored duplicate transcript for client %s", client_id)
             return
 
