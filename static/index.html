@@ -944,39 +944,49 @@
                 try {
                     const stream = await navigator.mediaDevices.getUserMedia({
                         audio: {
-                            channelCount: { ideal: 1 },
-                            echoCancellation: { ideal: true },
-                            noiseSuppression: { ideal: true },
-                            autoGainControl: { ideal: true },
-                            sampleRate: { ideal: 48000 },
-                            latency: { ideal: 0.01 },
+                            channelCount: 1,
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true,
+                            sampleRate: 16000,
                         },
                     });
                     activeMicrophoneStream = stream;
                     setupVisualizer(stream);
 
-                    mediaRecorder = new MediaRecorder(stream, { mimeType: preferredAudioMimeType() });
-                    mediaRecorder.ondataavailable = (event) => {
-                        if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) {
-                            ws.send(event.data);
-                            chunkCount++;
-                            valChunks.innerText = chunkCount;
+                    // ScriptProcessorNode (bufferSize: 4096, 1 input, 1 output) raw 16-bit PCM extraction with OVP1 header
+                    const audioCtx = audioContext || new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                    if (audioCtx.state === "suspended") await audioCtx.resume();
+
+                    const source = audioCtx.createMediaStreamSource(stream);
+                    const scriptProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
+                    sarvamPcmNode = scriptProcessor;
+
+                    scriptProcessor.onaudioprocess = (e) => {
+                        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+                        const inputData = e.inputBuffer.getChannelData(0);
+                        const pcmData = new Int16Array(inputData.length);
+                        for (let i = 0; i < inputData.length; i++) {
+                            const sample = Math.max(-1.0, Math.min(1.0, inputData[i]));
+                            pcmData[i] = sample < 0 ? Math.round(sample * 32768) : Math.round(sample * 32767);
                         }
+                        const pcmBytes = new Uint8Array(pcmData.buffer);
+                        const packet = new Uint8Array(4 + pcmBytes.byteLength);
+                        packet.set([79, 86, 80, 49]); // b"OVP1" header
+                        packet.set(pcmBytes, 4);
+
+                        ws.send(packet.buffer);
+                        chunkCount++;
+                        valChunks.innerText = chunkCount;
                     };
-                    mediaRecorder.onerror = () => {
-                        showSessionNotice("Audio capture stopped unexpectedly. Reconnect and try again.");
-                    };
-                    mediaRecorder.start(100); // 100ms packet emission window
-                    if (activeSttProvider === "sarvam") {
-                        await startSarvamPcmStream(stream);
-                    } else if (
-                        serverSttReady === true &&
-                        ["auto", "ml-IN"].includes(languageSelect.value)
-                    ) {
-                        startAutoSpeechDetector(stream);
-                    }
+
+                    source.connect(scriptProcessor);
+                    scriptProcessor.connect(audioCtx.destination);
+
+                    sttStatusBadge.innerText = "STT: STREAMING PCM";
+                    sttStatusBadge.className = "text-[10px] bg-emerald-50 text-emerald-600 border border-emerald-200 px-2.5 py-1 rounded-full font-bold animate-pulse flex items-center justify-between gap-1.5";
                     setVoicePhase("Listening");
-                    sttPreview.innerText = "Streaming audio continuously — awaiting server-side VAD…";
+                    sttPreview.innerText = "Streaming raw 16 kHz PCM frames with OVP1 header...";
                 } catch (err) {
                     console.warn("Microphone capture unavailable or muted:", err);
                     sttPreview.innerText = "Microphone access is required for voice transcription.";
