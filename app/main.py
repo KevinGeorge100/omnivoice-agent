@@ -320,6 +320,9 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
         if signal_type == "START_SPEECH":
             sarvam_speech_started_at = time.perf_counter()
             await cancel_and_wait(response_tasks)
+            await cancel_and_wait(stream_tasks)
+            async with send_lock:
+                await websocket.send_json({"type": "audio_clear_buffer", "turn_id": turn_id})
         async with send_lock:
             await websocket.send_json(
                 {
@@ -551,6 +554,9 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
                     await cancel_and_wait(transcription_tasks)
                     await cancel_and_wait(stream_tasks)
                     async with send_lock:
+                        await websocket.send_json(
+                            {"type": "audio_clear_buffer", "turn_id": turn_id}
+                        )
                         await websocket.send_json(
                             {"type": "assistant_interrupted", "turn_id": turn_id}
                         )

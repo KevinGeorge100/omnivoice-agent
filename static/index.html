@@ -1080,6 +1080,13 @@
                     return;
                 }
 
+                if (data.type === "audio_clear_buffer") {
+                    cancelTTS();
+                    audioPlaybackQueue = [];
+                    audioPlaybackBusy = false;
+                    return;
+                }
+
                 if (data.type === "assistant_interrupted") {
                     if (activeTurnId === null || data.turn_id === activeTurnId) {
                         finalizeAssistantBubble();
