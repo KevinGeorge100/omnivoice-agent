@@ -459,8 +459,8 @@
                                 const left = Math.floor(position);
                                 const right = Math.min(left + 1, frame.length - 1);
                                 const fraction = position - left;
-                                const sample = frame[left] + (frame[right] - frame[left]) * fraction;
-                                pcm[index] = Math.max(-1, Math.min(1, sample)) * 32767;
+                                const sample = Math.max(-1.0, Math.min(1.0, frame[left] + (frame[right] - frame[left]) * fraction));
+                                pcm[index] = sample < 0 ? Math.round(sample * 32768) : Math.round(sample * 32767);
                             }
                             this.port.postMessage(pcm.buffer, [pcm.buffer]);
                         }
