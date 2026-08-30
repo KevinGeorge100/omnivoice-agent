@@ -2,10 +2,13 @@
 
 import asyncio
 from collections.abc import Sequence
+import logging
 
 import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
+
+logger = logging.getLogger(__name__)
 
 
 class SemanticCacheRouter:
@@ -64,7 +67,11 @@ class SemanticCacheRouter:
 
     async def warm(self) -> None:
         """Preload the model and the seeded FAQ vectors during application startup."""
-        await self._initialize()
+        try:
+            await self._initialize()
+        except Exception:
+            logger.exception("Semantic cache warm-up failed")
+            raise
 
     def _sync_search(self, vector: np.ndarray) -> tuple[float, int]:
         """Perform FAISS index search synchronously off the event loop thread."""
@@ -79,21 +86,31 @@ class SemanticCacheRouter:
         self._responses.append(response)
 
     async def add_to_cache(self, query: str, response: str) -> None:
-        """Add a query and its response to the semantic cache."""
-        vector = await self._encode([query])
-        async with self._index_lock:
-            await asyncio.to_thread(self._sync_add, vector, response)
+        """Add a query and its response to the semantic cache safely."""
+        try:
+            vector = await self._encode([query])
+            async with self._index_lock:
+                await asyncio.to_thread(self._sync_add, vector, response)
+        except Exception:
+            logger.exception("Failed to add entry to semantic cache for query %r", query)
 
     async def lookup(self, query: str) -> str | None:
         """Return the nearest cached response when it meets the similarity threshold."""
-        vector = await self._encode([query])
-        async with self._index_lock:
-            assert self._index is not None
-            similarity, response_index = await asyncio.to_thread(self._sync_search, vector)
+        try:
+            vector = await self._encode([query])
+            async with self._index_lock:
+                if self._index is None:
+                    return None
+                similarity, response_index = await asyncio.to_thread(self._sync_search, vector)
 
-            if similarity < self.similarity_threshold or response_index < 0:
+                if similarity < self.similarity_threshold or response_index < 0:
+                    return None
+                if response_index < len(self._responses):
+                    return self._responses[response_index]
                 return None
-            return self._responses[response_index]
+        except Exception:
+            logger.exception("Semantic cache lookup failed for query %r; falling back to LLM", query)
+            return None
 
 
 semantic_cache = SemanticCacheRouter()

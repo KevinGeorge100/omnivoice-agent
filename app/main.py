@@ -12,7 +12,7 @@ from app.groq_stt import GroqWhisperTranscriber
 from app.latency_metrics import TurnLatencyRecord, latency_metrics
 from app.sarvam_stream import SarvamLiveTranscriber
 from app.semantic_cache import semantic_cache
-from app.session import TranscriptDeduplicator, cancel_and_wait, should_process_transcript
+from app.session import SessionState, TranscriptDeduplicator, cancel_and_wait, should_process_transcript
 from app.tts_stream import cartesia_tts
 
 app = FastAPI(title="OmniVoice Core Transport Layer")
@@ -216,12 +216,10 @@ async def stream_assistant_response(
 @app.websocket("/ws/audio/{client_id}")
 async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
     await pool_manager.connect(client_id, websocket)
+    session_state = SessionState(client_id)
     total_bytes_received = 0
     start_time = time.time()
     send_lock = asyncio.Lock()
-    response_tasks: set[asyncio.Task[None]] = set()
-    transcription_tasks: set[asyncio.Task[None]] = set()
-    stream_tasks: set[asyncio.Task[None]] = set()
     transcriber: DeepgramLiveTranscriber | None = None
     sarvam_transcriber: SarvamLiveTranscriber | None = None
     stt_language = websocket.query_params.get("language", "en-US")
@@ -271,7 +269,7 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
             logger.info("Ignored duplicate transcript for client %s", client_id)
             return
 
-        await cancel_and_wait(response_tasks)
+        await session_state.barge_in_atomic()
         turn_id += 1
 
         async with send_lock:
@@ -297,8 +295,7 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
             ),
             name=f"llm-stream-{client_id}-turn-{turn_id}",
         )
-        response_tasks.add(task)
-        task.add_done_callback(response_tasks.discard)
+        session_state.track_response(task)
 
     async def handle_deepgram_transcript(transcript: str, is_final: bool) -> None:
         """Relay interim text to the UI and route completed utterances to the agent."""
@@ -319,8 +316,7 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
         nonlocal sarvam_speech_started_at
         if signal_type == "START_SPEECH":
             sarvam_speech_started_at = time.perf_counter()
-            await cancel_and_wait(response_tasks)
-            await cancel_and_wait(stream_tasks)
+            await session_state.barge_in_atomic()
             async with send_lock:
                 await websocket.send_json({"type": "audio_clear_buffer", "turn_id": turn_id})
         async with send_lock:
@@ -549,10 +545,8 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
                 event_type = event.get("type")
 
                 if event_type == "barge_in":
-                    logger.info("Barge-in received from client %s. Cancelling response tasks.", client_id)
-                    await cancel_and_wait(response_tasks)
-                    await cancel_and_wait(transcription_tasks)
-                    await cancel_and_wait(stream_tasks)
+                    logger.info("Barge-in received from client %s. Cancelling active tasks.", client_id)
+                    await session_state.barge_in_atomic()
                     async with send_lock:
                         await websocket.send_json(
                             {"type": "audio_clear_buffer", "turn_id": turn_id}
@@ -587,8 +581,7 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
                         dispatch_sarvam_pcm(pcm_bytes),
                         name=f"sarvam-pcm-dispatch-{client_id}",
                     )
-                    stream_tasks.add(task)
-                    task.add_done_callback(stream_tasks.discard)
+                    session_state.track_stream(task)
                 continue
 
             if pending_utterance_mime is not None:
@@ -596,13 +589,12 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
                 pending_utterance_mime = None
                 utterance_started_at = pending_utterance_started_at or time.perf_counter()
                 pending_utterance_started_at = None
-                await cancel_and_wait(transcription_tasks)
+                await cancel_and_wait(session_state.transcription_tasks)
                 task = asyncio.create_task(
                     transcribe_auto_utterance(audio_chunk, mime_type, utterance_started_at),
                     name=f"whisper-stt-{client_id}",
                 )
-                transcription_tasks.add(task)
-                task.add_done_callback(transcription_tasks.discard)
+                session_state.track_transcription(task)
                 continue
 
             if transcriber is not None:
@@ -610,8 +602,7 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
                     dispatch_deepgram_webm(audio_chunk),
                     name=f"deepgram-webm-dispatch-{client_id}",
                 )
-                stream_tasks.add(task)
-                task.add_done_callback(stream_tasks.discard)
+                session_state.track_stream(task)
 
             chunk_size = len(audio_chunk)
             total_bytes_received += chunk_size
@@ -623,21 +614,18 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
                 send_transport_ack(total_bytes_received, chunk_size, elapsed_ms),
                 name=f"transport-ack-{client_id}",
             )
-            stream_tasks.add(ack_task)
-            ack_task.add_done_callback(stream_tasks.discard)
+            session_state.track_stream(ack_task)
 
     except WebSocketDisconnect:
         pass
     finally:
-        await cancel_and_wait(stream_tasks)
+        await session_state.close_atomic()
         if transcriber is not None:
             await transcriber.close()
         if sarvam_transcriber is not None:
             await sarvam_transcriber.close()
-        await cancel_and_wait(transcription_tasks)
         if whisper_transcriber is not None:
             await whisper_transcriber.close()
-        await cancel_and_wait(response_tasks)
         pool_manager.disconnect(client_id)
 
 @app.get("/")

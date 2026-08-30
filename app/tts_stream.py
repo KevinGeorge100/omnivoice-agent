@@ -5,14 +5,17 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
 import re
 from collections.abc import AsyncIterator, Iterable
 
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 from app.config import is_configured
 
+logger = logging.getLogger(__name__)
 
 _DEFAULT_CARTESIA_URL = "wss://api.cartesia.ai/tts/websocket"
 
@@ -28,12 +31,14 @@ class CartesiaTTSStreamer:
         model_id: str | None = None,
         sample_rate: int = 16000,
         output_format: str = "pcm_s16le",
+        max_reconnect_attempts: int = 3,
     ) -> None:
         self.api_key = (api_key or os.environ.get("CARTESIA_API_KEY") or "").strip()
         self.voice_id = (voice_id or os.environ.get("CARTESIA_VOICE_ID") or "").strip()
         self.model_id = (model_id or os.environ.get("CARTESIA_MODEL_ID") or "sonic-2").strip()
         self.sample_rate = int(sample_rate)
         self.output_format = output_format
+        self.max_reconnect_attempts = max_reconnect_attempts
         self._sequence = 0
         self._send_lock = asyncio.Lock()
         self._buffer: dict[str, str] = {}
@@ -48,31 +53,58 @@ class CartesiaTTSStreamer:
     def configured(self) -> bool:
         return bool(self.api_key and self.voice_id)
 
-    async def _get_connection(self):
-        """Get or establish a long-lived persistent WebSocket connection to Cartesia."""
+    async def ensure_session_active(self):
+        """Get or establish an active, verified persistent WebSocket session to Cartesia with exponential backoff."""
         if not self.configured:
             return None
+
         async with self._socket_lock:
             if self._socket is not None:
-                is_open = False
-                if hasattr(self._socket, "closed"):
-                    is_open = not self._socket.closed
-                elif hasattr(self._socket, "open"):
-                    is_open = bool(self._socket.open)
-                else:
-                    is_open = True
-                if is_open:
+                is_active = False
+                try:
+                    if hasattr(self._socket, "closed"):
+                        is_active = not self._socket.closed
+                    elif hasattr(self._socket, "open"):
+                        is_active = bool(self._socket.open)
+                    else:
+                        is_active = True
+                except Exception:
+                    is_active = False
+
+                if is_active:
                     return self._socket
 
-            headers = {"X-API-Key": self.api_key}
-            try:
-                self._socket = await websockets.connect(
-                    _DEFAULT_CARTESIA_URL, additional_headers=headers
-                )
-                return self._socket
-            except Exception:
+                # Stale connection detected; clear instance
+                logger.info("Cartesia WebSocket connection dropped; reconnecting...")
+                try:
+                    await self._socket.close()
+                except Exception:
+                    pass
                 self._socket = None
-                return None
+
+            # Exponential backoff reconnection loop
+            headers = {"X-API-Key": self.api_key}
+            backoff_seconds = 0.5
+            for attempt in range(1, self.max_reconnect_attempts + 1):
+                try:
+                    self._socket = await websockets.connect(
+                        _DEFAULT_CARTESIA_URL, additional_headers=headers
+                    )
+                    logger.info("Successfully established Cartesia WebSocket session (attempt %d)", attempt)
+                    return self._socket
+                except (ConnectionClosed, OSError, Exception) as err:
+                    logger.warning(
+                        "Cartesia connection attempt %d/%d failed: %s",
+                        attempt,
+                        self.max_reconnect_attempts,
+                        err,
+                    )
+                    self._socket = None
+                    if attempt < self.max_reconnect_attempts:
+                        await asyncio.sleep(backoff_seconds)
+                        backoff_seconds *= 2.0
+
+            return None
 
     def _flush_trigger(self, text: str) -> bool:
         if len(text) >= 80 and any(token in text for token in (",", ";", ":")):
@@ -144,7 +176,7 @@ class CartesiaTTSStreamer:
             },
         }
 
-        socket = await self._get_connection()
+        socket = await self.ensure_session_active()
         if socket is None:
             return
 
@@ -170,11 +202,24 @@ class CartesiaTTSStreamer:
                         yield audio_bytes
                 if payload.get("type") in {"done", "final", "completed"}:
                     break
-        except Exception:
+        except asyncio.CancelledError:
+            logger.info("Cartesia TTS streaming task cancelled due to barge-in; sending cancel frame.")
+            try:
+                if socket is not None:
+                    await socket.send(json.dumps({"type": "cancel", "context_id": "barge_in"}))
+            except Exception:
+                pass
+            raise
+        except ConnectionClosed:
+            logger.warning("Cartesia WebSocket closed unexpectedly during stream.")
             async with self._socket_lock:
                 if self._socket is socket:
                     self._socket = None
-            raise
+        except Exception as err:
+            logger.exception("Error during Cartesia audio synthesis: %s", err)
+            async with self._socket_lock:
+                if self._socket is socket:
+                    self._socket = None
 
     async def stream_tokens(
         self,
@@ -186,14 +231,19 @@ class CartesiaTTSStreamer:
         if not self.configured:
             return
 
-        if hasattr(token_iterable, "__aiter__"):
-            async for token in token_iterable:
-                await self.process_token(token, websocket, turn_id=turn_id)
-        else:
-            for token in token_iterable:
-                await self.process_token(token, websocket, turn_id=turn_id)
+        try:
+            if hasattr(token_iterable, "__aiter__"):
+                async for token in token_iterable:
+                    await self.process_token(token, websocket, turn_id=turn_id)
+            else:
+                for token in token_iterable:
+                    await self.process_token(token, websocket, turn_id=turn_id)
 
-        await self.flush_remaining(websocket, turn_id=turn_id)
+            await self.flush_remaining(websocket, turn_id=turn_id)
+        except asyncio.CancelledError:
+            key = str(turn_id) if turn_id is not None else "default"
+            self._buffer[key] = ""
+            raise
 
     async def _synthesize_and_send(self, text: str, websocket, *, turn_id: int | None = None) -> None:
         if not text or not self.configured:
@@ -202,6 +252,8 @@ class CartesiaTTSStreamer:
             async for audio in self._stream_cartesia_audio(text):
                 if audio:
                     await self.send_audio_chunk(websocket, audio, turn_id=turn_id)
+        except asyncio.CancelledError:
+            raise
         except Exception:
             return
 

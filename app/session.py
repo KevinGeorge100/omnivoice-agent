@@ -119,3 +119,49 @@ async def cancel_and_wait(tasks: set[asyncio.Task[None]]) -> None:
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
     tasks.clear()
+
+
+class SessionState:
+    """Centralized atomic turn state and task tracking manager for one client session."""
+
+    def __init__(self, client_id: str) -> None:
+        self.client_id = client_id
+        self.response_tasks: set[asyncio.Task[None]] = set()
+        self.transcription_tasks: set[asyncio.Task[None]] = set()
+        self.stream_tasks: set[asyncio.Task[None]] = set()
+        self._lock = asyncio.Lock()
+
+    def track_response(self, task: asyncio.Task[None]) -> None:
+        self.response_tasks.add(task)
+        task.add_done_callback(self.response_tasks.discard)
+
+    def track_transcription(self, task: asyncio.Task[None]) -> None:
+        self.transcription_tasks.add(task)
+        task.add_done_callback(self.transcription_tasks.discard)
+
+    def track_stream(self, task: asyncio.Task[None]) -> None:
+        self.stream_tasks.add(task)
+        task.add_done_callback(self.stream_tasks.discard)
+
+    async def barge_in_atomic(self) -> None:
+        """Atomically cancel all active response, transcription, and stream tasks."""
+        async with self._lock:
+            all_tasks = set()
+            all_tasks.update(self.response_tasks)
+            all_tasks.update(self.transcription_tasks)
+            all_tasks.update(self.stream_tasks)
+
+            current_task = asyncio.current_task()
+            pending = [t for t in all_tasks if t is not current_task and not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+            self.response_tasks.clear()
+            self.transcription_tasks.clear()
+            self.stream_tasks.clear()
+
+    async def close_atomic(self) -> None:
+        """Clean up all session tasks on WebSocket disconnect."""
+        await self.barge_in_atomic()
