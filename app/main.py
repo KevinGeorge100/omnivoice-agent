@@ -548,6 +548,7 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
                     continue
 
                 event_type = event.get("type")
+                logger.info("[Gateway] Received event %r from client %s", event_type, client_id)
 
                 if event_type == "barge_in":
                     logger.info("Barge-in received from client %s. Cancelling active tasks.", client_id)
@@ -571,12 +572,15 @@ async def audio_stream_endpoint(websocket: WebSocket, client_id: str):
                 if event_type == "user_utterance" and isinstance(event.get("text"), str):
                     transcript = event["text"].strip()
                     if transcript:
+                        logger.info("[Gateway] Processing user utterance: %r", transcript)
                         await begin_assistant_response(transcript, source="browser")
                 continue
 
             audio_chunk = message.get("bytes")
             if audio_chunk is None:
                 continue
+
+            logger.info("[Gateway] Received audio block (%d bytes) from client %s", len(audio_chunk), client_id)
 
             # Central Routing Dispatcher: low-cost binary parsing & non-blocking dispatch
             if audio_chunk.startswith(SARVAM_PCM_FRAME_PREFIX):
