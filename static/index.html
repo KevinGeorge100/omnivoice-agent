@@ -134,11 +134,11 @@
 
         <!-- Audio Streamer -->
         <section class="bg-white/90 border border-slate-200/80 rounded-2xl p-5 shadow-sm flex flex-col gap-4 min-h-[31rem]">
-            <div class="flex justify-between items-center">
+            <div class="flex items-center justify-between">
                 <h3 class="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
                     <span>🎙️</span> Audio Streamer
                 </h3>
-                <span id="sttStatusBadge" class="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full font-bold border border-slate-200">
+                <span id="sttStatusBadge" class="text-[10px] bg-slate-100 text-slate-500 px-2.5 py-1 rounded-full font-bold border border-slate-200 flex items-center justify-between gap-1.5">
                     STT: OFF
                 </span>
             </div>
@@ -148,14 +148,16 @@
                 <canvas id="visualizer" class="w-full h-full block"></canvas>
             </div>
 
-            <div class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
-                <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Live transcript</p>
-                <p id="sttPreview" class="mt-1 truncate text-xs text-slate-600">Waiting for speech…</p>
-                <div class="mt-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
-                    <span id="voicePhase">Idle</span>
-                    <span class="text-slate-300">•</span>
-                    <span id="sttLatency">STT --</span>
+            <div class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 flex flex-col justify-between gap-1.5">
+                <div class="flex items-center justify-between">
+                    <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Live transcript</p>
+                    <div class="flex items-center justify-between gap-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                        <span id="voicePhase">Idle</span>
+                        <span class="text-slate-300">•</span>
+                        <span id="sttLatency">STT --</span>
+                    </div>
                 </div>
+                <p id="sttPreview" class="truncate text-xs text-slate-600">Waiting for speech…</p>
             </div>
 
             <div id="sessionNotice" role="alert" class="hidden rounded-xl border px-3 py-2 text-xs leading-relaxed"></div>
@@ -209,7 +211,7 @@
                             <span class="tag-badge text-[10px] uppercase font-bold bg-sky-50 text-sky-600 border border-sky-200/80 px-2 py-0.5 rounded-md">Ready</span>
                         </div>
                         <div class="bubble-content text-xs leading-relaxed text-slate-700">
-                            Welcome to the OmniVoice 20% Transport Baseline. Speak into your microphone or send a message using the input bar below.
+                            OmniVoice agent initialized. Speak into your microphone or type a query (e.g., "Are seats open?") to test sub-500ms voice interaction.
                         </div>
                     </div>
                 </div>
@@ -217,7 +219,7 @@
                 <!-- Rescued & Integrated Chat Input Bar -->
                 <div class="border-t border-slate-200/80 pt-3">
                     <div class="flex items-center gap-2">
-                        <input type="text" id="manualUtterance" placeholder="Type a message or utterance (e.g. What are your business hours?)..." class="flex-1 bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm" />
+                        <input type="text" id="manualUtterance" placeholder="Type a query (e.g. Are seats open? or What are your business hours?)..." class="flex-1 bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm" />
                         <button id="sendUtteranceBtn" class="bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white font-semibold px-5 py-2.5 rounded-xl text-xs transition-all shadow-sm shadow-indigo-100 flex items-center gap-1.5">
                             <span>Send</span>
                             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>

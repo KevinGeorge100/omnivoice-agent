@@ -27,6 +27,8 @@ class SemanticCacheRouter:
             ("What are your business hours?", "Our business hours are Monday through Friday, 9 AM to 5 PM."),
             ("Where is your campus located?", "Our campus is located at 100 Innovation Drive, downtown."),
             ("How can I contact your team?", "You can contact our team at support@omnivoice.example or (555) 010-2000."),
+            ("Are seats open?", "Yes, admission seats for the upcoming academic session are currently open."),
+            ("Admission seats", "Admission seats for the upcoming academic session are currently open."),
         )
 
     async def _initialize(self) -> None:
